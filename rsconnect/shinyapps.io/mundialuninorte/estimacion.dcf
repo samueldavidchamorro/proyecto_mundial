@@ -5,6 +5,6 @@ account: mundialuninorte
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 17495103
-bundleId: 12112231
+bundleId: 12112248
 url: https://mundialuninorte.shinyapps.io/estimacion/
 version: 1
