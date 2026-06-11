@@ -695,10 +695,7 @@ ui <- dashboardPage(
     title = tagList(
       tags$head(
         tags$title("WC 2026 Simulator"),
-        tags$link(
-          rel  = "icon",
-          href = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>%E2%9A%BD</text></svg>"
-        )
+        tags$link(rel="icon", type="image/png", href="trophy.png")
       ),
       tags$span(
         style = "display:flex;align-items:center;gap:10px;",
@@ -707,7 +704,6 @@ ui <- dashboardPage(
           height = "36",
           style  = "flex-shrink:0;filter:drop-shadow(0 0 6px rgba(245,208,96,0.5));"
         ),
-        tags$style(HTML("@keyframes ballSpin { from{filter:drop-shadow(0 0 6px rgba(100,207,246,0.7));} 50%{filter:drop-shadow(0 0 12px rgba(100,207,246,0.9));} to{filter:drop-shadow(0 0 6px rgba(100,207,246,0.7));} }")),
         tags$span(
           style = "font-family:'Inter',sans-serif;font-weight:700;font-size:0.9em;letter-spacing:0.3px;",
           "WC 2026 . Simulador"
@@ -760,38 +756,6 @@ ui <- dashboardPage(
     ),
 
     tags$div(style = paste0(
-      "margin:12px 14px;height:1px;",
-      "background:linear-gradient(90deg,transparent,rgba(46,134,171,0.5),transparent);"
-    )),
-
-    tags$div(
-      style = "padding:4px 14px 8px;",
-      tags$div(style = "display:flex;flex-direction:column;gap:6px;",
-        tags$div(style = paste0(
-          "display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:7px;",
-          "background:rgba(46,134,171,0.07);"
-        ),
-          tags$span(icon("futbol"), style="color:#2E86AB;font-size:0.85em;width:14px;text-align:center;"),
-          tags$span("48 equipos . 12 grupos", style="color:#7FADD4;font-size:0.75em;")
-        ),
-        tags$div(style = paste0(
-          "display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:7px;",
-          "background:rgba(46,134,171,0.07);"
-        ),
-          tags$span(icon("globe"), style="color:#2E86AB;font-size:0.85em;width:14px;text-align:center;"),
-          tags$span("USA . Canada . Mexico", style="color:#7FADD4;font-size:0.75em;")
-        ),
-        tags$div(style = paste0(
-          "display:flex;align-items:center;gap:9px;padding:6px 10px;border-radius:7px;",
-          "background:rgba(46,134,171,0.07);"
-        ),
-          tags$span(icon("calendar"), style="color:#2E86AB;font-size:0.85em;width:14px;text-align:center;"),
-          tags$span("Sorteo: 5 dic 2025", style="color:#7FADD4;font-size:0.75em;")
-        )
-      )
-    ),
-
-    tags$div(style = paste0(
       "margin:8px 14px;height:1px;",
       "background:linear-gradient(90deg,transparent,rgba(46,134,171,0.5),transparent);"
     )),
@@ -827,6 +791,58 @@ ui <- dashboardPage(
                  "Ventaja de jugar en casa",  tags$br(),
                  "Hasta 1,000 simulaciones")
       )
+    ),
+
+    tags$div(style="margin:8px 14px;height:1px;background:linear-gradient(90deg,transparent,rgba(46,134,171,0.5),transparent);"),
+
+    # ---- AUTORES ----
+    tags$div(
+      style = "margin:0 14px 18px;",
+      tags$div(style=paste0(
+        "display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+        "padding:6px 10px;border-radius:8px;background:rgba(46,134,171,0.08);"
+      ),
+        tags$div(style=paste0(
+          "width:24px;height:24px;border-radius:50%;flex-shrink:0;",
+          "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
+          "display:flex;align-items:center;justify-content:center;"
+        ), icon("users", style="color:#AED6F1;font-size:0.65em;")),
+        tags$span(style="color:#64CFF6;font-size:0.68em;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;",
+          "Autores del Proyecto")
+      ),
+      do.call(tagList, lapply(list(
+        list(ini="JL", name="Jacobo Londono",    url="https://www.linkedin.com/in/jacobo-londo%C3%B1o-baquero-a2b86733a/"),
+        list(ini="SC", name="Samuel Chamorro",   url="https://www.linkedin.com/in/samuel-chamorro-sol%C3%B3rzano-b393b831a"),
+        list(ini="JB", name="Jesus D. Barrios",  url="https://www.linkedin.com/in/jesus-barriosv/")
+      ), function(a) {
+        tags$div(style=paste0(
+          "display:flex;align-items:center;gap:9px;padding:7px 10px;",
+          "border-radius:8px;margin-bottom:5px;",
+          "background:rgba(11,27,56,0.7);border:1px solid rgba(46,134,171,0.18);"
+        ),
+          tags$div(style=paste0(
+            "width:28px;height:28px;border-radius:50%;flex-shrink:0;",
+            "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
+            "display:flex;align-items:center;justify-content:center;",
+            "font-size:0.65em;font-weight:800;color:#E8F4FD;"
+          ), a$ini),
+          tags$div(style="flex:1;min-width:0;",
+            tags$div(style="color:#C5D8E8;font-size:0.78em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+              a$name),
+            tags$a(href=a$url, target="_blank",
+              style=paste0(
+                "display:inline-flex;align-items:center;gap:4px;",
+                "color:#0A66C2;font-size:0.66em;font-weight:600;text-decoration:none;"
+              ),
+              tags$svg(xmlns="http://www.w3.org/2000/svg",viewBox="0 0 24 24",width="10",height="10",
+                style="fill:#0A66C2;flex-shrink:0;",
+                tags$path(d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z")
+              ),
+              "LinkedIn"
+            )
+          )
+        )
+      }))
     )
   ),
 
