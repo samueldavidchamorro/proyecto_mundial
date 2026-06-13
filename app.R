@@ -14,6 +14,99 @@ library(plotly)
 library(scales)
 library(stringr)
 library(DT)
+library(httr2)
+
+# ============================================================
+# CHATBOT GEMINI - Asistente del Mundial 2026
+# ============================================================
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0) b else a
+
+GEMINI_MODEL <- "gemini-2.5-flash"   # modelo gratis; cambia aqui si quieres otro
+
+CHAT_SYSTEM_BASE <- paste(
+  "Eres 'Asistente Mundial 2026', un chatbot dentro de una app Shiny que simula",
+  "la fase de grupos y eliminatorias del Mundial FIFA 2026.",
+  "Respondes SIEMPRE en espanol, breve, claro y amigable (2-4 frases salvo que pidan mas detalle).",
+  "Tu fuente de verdad son los DATOS incluidos abajo, que reflejan lo que el usuario ya calculo en la app.",
+  "REGLAS:",
+  "1) No inventes numeros: usa solo los de los DATOS.",
+  "2) Si preguntan por clasificados, probabilidades de clasificar o de campeon y ese dato NO aparece abajo,",
+  "   indica amablemente que primero corran esa simulacion en la pestana correspondiente",
+  "   (Simulacion / Probabilidades / Eliminacion Directa).",
+  "3) Metodologia: cada equipo tiene una fuerza segun su ranking FIFA; los anfitriones (USA, Canada, Mexico)",
+  "   tienen una pequena ventaja; los goles se generan con azar realista; victoria=3, empate=1, derrota=0;",
+  "   clasifican los 2 primeros de cada grupo mas los 8 mejores terceros = 32 equipos a dieciseisavos.",
+  "4) Si la pregunta no tiene que ver con el Mundial o la app, responde corto y reconduce con amabilidad.",
+  sep = "\n"
+)
+
+# ULTIMO RECURSO: si el .Renviron no carga, pega aqui tu clave entre comillas.
+# Ej: GEMINI_API_KEY_FALLBACK <- "AQ.xxxxxxxx"
+GEMINI_API_KEY_FALLBACK <- "AQ.Ab8RN6JC7QzTVPPasR6j4x0Y9TqV4JsKxCXf8deZWYgseYjtew"
+
+# Busca la clave de forma robusta: entorno -> .Renviron (o .Renviron.txt) -> fallback
+load_gemini_key <- function() {
+  k <- Sys.getenv("GEMINI_API_KEY")
+  if (!identical(k, "")) return(k)
+  
+  cand <- c(".Renviron", ".Renviron.txt",
+            file.path(getwd(), ".Renviron"), file.path(getwd(), ".Renviron.txt"))
+  for (f in cand) {
+    if (file.exists(f)) {
+      lines <- tryCatch(readLines(f, warn = FALSE), error = function(e) character(0))
+      hit <- grep("GEMINI_API_KEY", lines, value = TRUE)
+      if (length(hit) > 0) {
+        val <- sub("^\\s*GEMINI_API_KEY\\s*=\\s*", "", hit[1])
+        val <- trimws(gsub("[\"']", "", val))
+        if (!identical(val, "")) { Sys.setenv(GEMINI_API_KEY = val); return(val) }
+      }
+    }
+  }
+  if (!identical(GEMINI_API_KEY_FALLBACK, "")) {
+    Sys.setenv(GEMINI_API_KEY = GEMINI_API_KEY_FALLBACK)
+    return(GEMINI_API_KEY_FALLBACK)
+  }
+  ""
+}
+
+# Llama a la API de Gemini: system_text (contexto) + history (lista role/text)
+call_gemini <- function(system_text, history) {
+  key <- load_gemini_key()
+  if (identical(key, "")) {
+    return(paste0(
+      "No encuentro la clave de Gemini. Tres opciones: 1) revisa que el archivo se llame ",
+      "exactamente .Renviron (sin .txt) y este junto a app.R; 2) en RStudio usa Session > Restart R; ",
+      "o 3) abre app.R y pega tu clave en la linea GEMINI_API_KEY_FALLBACK <- \"...\" cerca del inicio."))
+  }
+  contents <- lapply(history, function(m) {
+    list(role = m$role, parts = list(list(text = m$text)))
+  })
+  body <- list(
+    system_instruction = list(parts = list(list(text = system_text))),
+    contents = contents,
+    generationConfig = list(temperature = 0.4, maxOutputTokens = 800)
+  )
+  url <- paste0("https://generativelanguage.googleapis.com/v1beta/models/",
+                GEMINI_MODEL, ":generateContent")
+  req <- httr2::request(url)
+  req <- httr2::req_headers(req, `x-goog-api-key` = key, `Content-Type` = "application/json")
+  req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
+  req <- httr2::req_timeout(req, 30)
+  req <- httr2::req_error(req, is_error = function(resp) FALSE)
+  resp <- tryCatch(httr2::req_perform(req), error = function(e) e)
+  if (inherits(resp, "error")) {
+    return(paste0("No pude conectar con Gemini: ", conditionMessage(resp)))
+  }
+  parsed <- tryCatch(httr2::resp_body_json(resp), error = function(e) NULL)
+  txt <- tryCatch(parsed$candidates[[1]]$content$parts[[1]]$text, error = function(e) NULL)
+  if (is.null(txt) || identical(txt, "")) {
+    errmsg <- tryCatch(parsed$error$message, error = function(e) NULL)
+    if (!is.null(errmsg)) return(paste0("Gemini devolvio un error: ", errmsg))
+    return("No recibi respuesta del modelo. Intenta de nuevo en unos segundos.")
+  }
+  txt
+}
+
 
 # ---- Paleta de colores (misma que app.R) ----
 AZUL_MAIN   <- "#2E86AB"
@@ -170,14 +263,14 @@ trophy_svg <- function(size = 34) {
     # Gradientes
     tags$defs(
       tags$linearGradient(id="tgold", x1="0%", y1="0%", x2="100%", y2="100%",
-        tags$stop(offset="0%",   style="stop-color:#F5D060"),
-        tags$stop(offset="40%",  style="stop-color:#C8960C"),
-        tags$stop(offset="70%",  style="stop-color:#F5D060"),
-        tags$stop(offset="100%", style="stop-color:#8B6914")
+                          tags$stop(offset="0%",   style="stop-color:#F5D060"),
+                          tags$stop(offset="40%",  style="stop-color:#C8960C"),
+                          tags$stop(offset="70%",  style="stop-color:#F5D060"),
+                          tags$stop(offset="100%", style="stop-color:#8B6914")
       ),
       tags$linearGradient(id="tbase", x1="0%", y1="0%", x2="0%", y2="100%",
-        tags$stop(offset="0%",   style="stop-color:#2E5B3B"),
-        tags$stop(offset="100%", style="stop-color:#1A3525")
+                          tags$stop(offset="0%",   style="stop-color:#2E5B3B"),
+                          tags$stop(offset="100%", style="stop-color:#1A3525")
       )
     ),
     # Base esmeralda
@@ -233,10 +326,10 @@ compute_team_stats <- function() {
   fpts      <- sapply(teams, get_pts)
   fpts_norm <- (fpts - min(fpts)) / (max(fpts) - min(fpts))
   ss        <- 0.6 + fpts_norm * 1.6
-
+  
   get_conf  <- function(t) { idx <- match(t, names(CONF_MAP));  if (!is.na(idx)) CONF_MAP[[idx]]  else "UEFA" }
   get_color <- function(t) { conf <- get_conf(t); idx <- match(conf, names(CONF_COLORS)); if (!is.na(idx)) CONF_COLORS[[idx]] else "#888888" }
-
+  
   df <- data.frame(
     team           = teams,
     confederation  = sapply(teams, get_conf),
@@ -345,7 +438,7 @@ run_group_stage <- function(seed = NULL) {
   if (!is.null(seed)) set.seed(seed)
   all_st   <- lapply(GROUPS_DATA, build_standings)
   matches  <- list()
-
+  
   for (jornada in 1:3) {
     for (grp in names(GROUPS_DATA)) {
       teams <- GROUPS_DATA[[grp]]
@@ -369,10 +462,10 @@ run_group_stage <- function(seed = NULL) {
       }
     }
   }
-
+  
   # Sort standings
   all_st <- lapply(all_st, sort_standings)
-
+  
   # Clasificados
   qualified <- list()
   thirds     <- list()
@@ -387,7 +480,7 @@ run_group_stage <- function(seed = NULL) {
                                        PTS=as.integer(st[3,"PTS"]), DG=as.integer(st[3,"DG"]), GF=as.integer(st[3,"GF"]),
                                        FIFA_PTS=as.numeric(ts_get(teams_sorted[3], "fifa_points")))))
   }
-
+  
   thirds_df <- do.call(rbind, lapply(thirds, function(x) {
     data.frame(group=x$group, pos=as.character(x$pos), team=as.character(x$team),
                PTS=as.integer(x$PTS), DG=as.integer(x$DG), GF=as.integer(x$GF),
@@ -403,16 +496,16 @@ run_group_stage <- function(seed = NULL) {
                                              DG=as.integer(r$DG),
                                              GF=as.integer(r$GF))))
   }
-
+  
   qual_df <- do.call(rbind, lapply(qualified, function(x) {
     data.frame(group=as.character(x$group), pos=as.character(x$pos),
                team=as.character(x$team), PTS=as.integer(x$PTS),
                DG=as.integer(x$DG), GF=as.integer(x$GF),
                stringsAsFactors=FALSE)
   }))
-
+  
   matches_df <- if (length(matches) > 0) do.call(rbind, matches) else data.frame()
-
+  
   list(
     standings  = all_st,
     matches    = matches_df,
@@ -427,18 +520,18 @@ run_group_stage_fast <- function() {
   # Precomputed lambda por equipo (vector nombrado)
   lams <- setNames(TEAM_STATS$lambda_base, TEAM_STATS$team_key)
   fpts <- setNames(TEAM_STATS$fifa_points, TEAM_STATS$team_key)
-
+  
   qual_teams <- character(32)
   qi <- 0L
   thirds_list <- vector("list", 12)
   ti <- 0L
-
+  
   for (grp in names(GROUPS_DATA)) {
     teams <- GROUPS_DATA[[grp]]
     pts <- setNames(integer(4), teams)
     dg  <- setNames(integer(4), teams)
     gf  <- setNames(integer(4), teams)
-
+    
     # 6 partidos round-robin
     pairs <- list(c(1,2),c(1,3),c(1,4),c(2,3),c(2,4),c(3,4))
     for (p in pairs) {
@@ -455,11 +548,11 @@ run_group_stage_fast <- function() {
       else if (ga < gb) { pts[tb] <- pts[tb] + 3L }
       else              { pts[ta] <- pts[ta] + 1L; pts[tb] <- pts[tb] + 1L }
     }
-
+    
     fp <- fpts[teams]; fp[is.na(fp)] <- 1400
     ord <- order(-pts, -dg, -gf, -fp)
     ranked <- teams[ord]
-
+    
     qual_teams[qi+1L] <- ranked[1]; qual_teams[qi+2L] <- ranked[2]; qi <- qi + 2L
     ti <- ti + 1L
     thirds_list[[ti]] <- list(
@@ -468,7 +561,7 @@ run_group_stage_fast <- function() {
       fp=fp[ranked[3]]
     )
   }
-
+  
   # Seleccionar 8 mejores terceros
   third_pts <- sapply(thirds_list, `[[`, "pts")
   third_dg  <- sapply(thirds_list, `[[`, "dg")
@@ -476,26 +569,26 @@ run_group_stage_fast <- function() {
   third_fp  <- sapply(thirds_list, `[[`, "fp")
   third_ord <- order(-third_pts, -third_dg, -third_gf, -third_fp)
   best8_idx <- third_ord[1:8]
-
+  
   for (i in best8_idx) {
     qi <- qi + 1L
     qual_teams[qi] <- thirds_list[[i]]$team
   }
-
+  
   qual_teams[1:qi]
 }
 
 run_monte_carlo <- function(n_sims = 1000) {
   all_teams <- unlist(GROUPS_DATA)
   qual_count <- setNames(integer(length(all_teams)), all_teams)
-
+  
   for (s in seq_len(n_sims)) {
     classified <- run_group_stage_fast()
     idx <- match(classified, names(qual_count))
     idx <- idx[!is.na(idx)]
     qual_count[idx] <- qual_count[idx] + 1L
   }
-
+  
   teams_mc <- names(qual_count)
   data.frame(
     team        = teams_mc,
@@ -524,19 +617,19 @@ assign_thirds_to_bracket <- function(third_groups) {
 # Construir bracket R32 desde qualified_df - robusto
 build_bracket <- function(qualified_df) {
   q <- qualified_df
-
+  
   # Normalizar pos para comparacion segura
   q$pos <- as.character(q$pos)
   q$group <- as.character(q$group)
-
+  
   firsts  <- q[q$pos == "1",  ]
   seconds <- q[q$pos == "2",  ]
   thirds  <- q[q$pos == "3*", ]
-
+  
   firsts  <- firsts[order(firsts$group),  ]
   seconds <- seconds[order(seconds$group), ]
   thirds  <- thirds[order(thirds$group),  ]
-
+  
   # Lookup seguro: devuelve "TBD" si no encuentra
   get1 <- function(g) {
     v <- firsts$team[firsts$group == g]
@@ -549,7 +642,7 @@ build_bracket <- function(qualified_df) {
   get3 <- function(i) {
     if (i <= nrow(thirds)) as.character(thirds$team[i]) else "TBD"
   }
-
+  
   list(
     list(a=get1("A"), b=get2("B")),
     list(a=get1("C"), b=get2("D")),
@@ -574,20 +667,20 @@ build_bracket <- function(qualified_df) {
 simulate_ko <- function(team_a, team_b, scores=FALSE) {
   la <- ts_get(team_a, "lambda_base"); if (is.na(la)) la <- 1.2
   lb <- ts_get(team_b, "lambda_base"); if (is.na(lb)) lb <- 1.2
-
+  
   ga <- rpois(1L, la); gb <- rpois(1L, lb)
-
+  
   # Tiempo extra si empate (30 min ~= 0.4 partido)
   if (ga == gb) {
     ga <- ga + rpois(1L, la*0.4)
     gb <- gb + rpois(1L, lb*0.4)
   }
-
+  
   # Penales Bradley-Terry si sigue empate
   winner <- if (ga > gb) team_a else if (gb > ga) team_b else {
     if (runif(1) < la/(la+lb)) team_a else team_b
   }
-
+  
   if (scores) list(winner=winner, ga=ga, gb=gb)
   else winner
 }
@@ -595,9 +688,9 @@ simulate_ko <- function(team_a, team_b, scores=FALSE) {
 # Simular bracket completo -> devuelve lista con resultados por ronda
 simulate_bracket_full <- function(qualified_df) {
   bracket <- build_bracket(qualified_df)
-
+  
   safe_team <- function(t) if (is.null(t) || length(t)==0 || is.na(t) || t=="") "TBD" else t
-
+  
   run_round <- function(matches) {
     lapply(matches, function(m) {
       ta <- safe_team(m$a); tb <- safe_team(m$b)
@@ -609,36 +702,36 @@ simulate_bracket_full <- function(qualified_df) {
       list(a=ta, b=tb, winner=safe_team(res$winner), ga=res$ga, gb=res$gb)
     })
   }
-
+  
   r32 <- run_round(bracket)
   w32 <- sapply(r32, function(m) safe_team(m$winner))
-
+  
   # Garantizar exactamente 16 ganadores
   while (length(w32) < 16) w32 <- c(w32, "TBD")
   w32 <- w32[1:16]
-
+  
   r16_matches <- lapply(seq(1,16,by=2), function(i) list(a=w32[i], b=w32[i+1]))
   r16 <- run_round(r16_matches)
   w16 <- sapply(r16, function(m) safe_team(m$winner))
   while (length(w16) < 8) w16 <- c(w16, "TBD")
   w16 <- w16[1:8]
-
+  
   qf_matches <- lapply(seq(1,8,by=2), function(i) list(a=w16[i], b=w16[i+1]))
   qf <- run_round(qf_matches)
   wqf <- sapply(qf, function(m) safe_team(m$winner))
   while (length(wqf) < 4) wqf <- c(wqf, "TBD")
   wqf <- wqf[1:4]
-
+  
   sf_matches <- lapply(seq(1,4,by=2), function(i) list(a=wqf[i], b=wqf[i+1]))
   sf <- run_round(sf_matches)
   wsf <- sapply(sf, function(m) safe_team(m$winner))
   while (length(wsf) < 2) wsf <- c(wsf, "TBD")
   wsf <- wsf[1:2]
-
+  
   fin_matches <- list(list(a=wsf[1], b=wsf[2]))
   fin <- run_round(fin_matches)
   champion <- safe_team(fin[[1]]$winner)
-
+  
   list(r32=r32, r16=r16, qf=qf, sf=sf, final=fin, champion=champion)
 }
 
@@ -646,7 +739,7 @@ simulate_bracket_full <- function(qualified_df) {
 run_champion_mc <- function(n_sims=500) {
   all_teams <- unlist(GROUPS_DATA)
   champ_count <- setNames(integer(length(all_teams)), all_teams)
-
+  
   for (s in seq_len(n_sims)) {
     qual_teams_vec <- run_group_stage_fast()
     # Construir qualified_df minimo
@@ -656,7 +749,7 @@ run_champion_mc <- function(n_sims=500) {
       ts <- GROUPS_DATA[[g]]
       for (k in 1:4) pos_idx[ts[k]] <- k
     }
-
+    
     qual <- data.frame(
       team  = qual_teams_vec,
       group = sapply(qual_teams_vec, grp_of),
@@ -677,7 +770,7 @@ run_champion_mc <- function(n_sims=500) {
     idx <- match(ch, names(champ_count))
     if (!is.na(idx)) champ_count[idx] <- champ_count[idx] + 1L
   }
-
+  
   data.frame(
     team  = names(champ_count),
     prob  = as.numeric(champ_count) / n_sims,
@@ -690,7 +783,7 @@ run_champion_mc <- function(n_sims=500) {
 # ============================================================
 ui <- dashboardPage(
   skin = "blue",
-
+  
   dashboardHeader(
     title = tagList(
       tags$head(
@@ -712,10 +805,10 @@ ui <- dashboardPage(
     ),
     titleWidth = 300
   ),
-
+  
   dashboardSidebar(
     width = 265,
-
+    
     tags$div(
       style = "padding:18px 18px 10px;",
       tags$div(
@@ -743,23 +836,23 @@ ui <- dashboardPage(
         )
       )
     ),
-
+    
     sidebarMenu(id = "sidebar_tabs",
-      menuItem("Introduccion",     tabName = "intro",       icon = icon("info-circle")),
-      menuItem("Grupos Oficiales", tabName = "grupos",      icon = icon("layer-group")),
-      menuItem("Simulacion",       tabName = "simulacion",  icon = icon("play-circle")),
-      menuItem("Clasificados",     tabName = "clasificados",icon = icon("trophy")),
-      menuItem("Probabilidades",   tabName = "montecarlo",  icon = icon("dice")),
-      menuItem(">>> Eliminacion Directa", tabName = "campeon", icon = icon("crown")),
-      menuItem("Ranking equipos",  tabName = "variables",   icon = icon("chart-bar")),
-      menuItem("Metodologia",      tabName = "metodologia", icon = icon("cogs"))
+                menuItem("Introduccion",     tabName = "intro",       icon = icon("info-circle")),
+                menuItem("Grupos Oficiales", tabName = "grupos",      icon = icon("layer-group")),
+                menuItem("Simulacion",       tabName = "simulacion",  icon = icon("play-circle")),
+                menuItem("Clasificados",     tabName = "clasificados",icon = icon("trophy")),
+                menuItem("Probabilidades",   tabName = "montecarlo",  icon = icon("dice")),
+                menuItem(">>> Eliminacion Directa", tabName = "campeon", icon = icon("crown")),
+                menuItem("Ranking equipos",  tabName = "variables",   icon = icon("chart-bar")),
+                menuItem("Metodologia",      tabName = "metodologia", icon = icon("cogs"))
     ),
-
+    
     tags$div(style = paste0(
       "margin:8px 14px;height:1px;",
       "background:linear-gradient(90deg,transparent,rgba(46,134,171,0.5),transparent);"
     )),
-
+    
     # Modelo info
     tags$div(
       style = paste0(
@@ -780,21 +873,21 @@ ui <- dashboardPage(
           "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
           "display:flex;align-items:center;justify-content:center;"
         ),
-          icon("robot", style="color:#AED6F1;font-size:0.7em;")
+        icon("robot", style="color:#AED6F1;font-size:0.7em;")
         ),
         tags$div(style="color:#64CFF6;font-size:0.68em;text-transform:uppercase;letter-spacing:1.5px;font-weight:700;",
                  "Motor de simulacion")
       ),
       tags$div(style="display:flex;flex-direction:column;gap:5px;",
-        tags$div(style="color:#E8F4FD;font-size:0.82em;font-weight:600;", "Basado en Ranking FIFA"),
-        tags$div(style="color:#4A7A9B;font-size:0.72em;line-height:1.5;",
-                 "Ventaja de jugar en casa",  tags$br(),
-                 "Hasta 1,000 simulaciones")
+               tags$div(style="color:#E8F4FD;font-size:0.82em;font-weight:600;", "Basado en Ranking FIFA"),
+               tags$div(style="color:#4A7A9B;font-size:0.72em;line-height:1.5;",
+                        "Ventaja de jugar en casa",  tags$br(),
+                        "Hasta 1,000 simulaciones")
       )
     ),
-
+    
     tags$div(style="margin:8px 14px;height:1px;background:linear-gradient(90deg,transparent,rgba(46,134,171,0.5),transparent);"),
-
+    
     # ---- AUTORES ----
     tags$div(
       style = "margin:0 14px 18px;",
@@ -802,13 +895,13 @@ ui <- dashboardPage(
         "display:flex;align-items:center;gap:8px;margin-bottom:8px;",
         "padding:6px 10px;border-radius:8px;background:rgba(46,134,171,0.08);"
       ),
-        tags$div(style=paste0(
-          "width:24px;height:24px;border-radius:50%;flex-shrink:0;",
-          "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
-          "display:flex;align-items:center;justify-content:center;"
-        ), icon("users", style="color:#AED6F1;font-size:0.65em;")),
-        tags$span(style="color:#64CFF6;font-size:0.68em;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;",
-          "Autores del Proyecto")
+      tags$div(style=paste0(
+        "width:24px;height:24px;border-radius:50%;flex-shrink:0;",
+        "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
+        "display:flex;align-items:center;justify-content:center;"
+      ), icon("users", style="color:#AED6F1;font-size:0.65em;")),
+      tags$span(style="color:#64CFF6;font-size:0.68em;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;",
+                "Autores del Proyecto")
       ),
       do.call(tagList, lapply(list(
         list(ini="JL", name="Jacobo Londono",    url="https://www.linkedin.com/in/jacobo-londo%C3%B1o-baquero-a2b86733a/"),
@@ -820,32 +913,32 @@ ui <- dashboardPage(
           "border-radius:8px;margin-bottom:5px;",
           "background:rgba(11,27,56,0.7);border:1px solid rgba(46,134,171,0.18);"
         ),
-          tags$div(style=paste0(
-            "width:28px;height:28px;border-radius:50%;flex-shrink:0;",
-            "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
-            "display:flex;align-items:center;justify-content:center;",
-            "font-size:0.65em;font-weight:800;color:#E8F4FD;"
-          ), a$ini),
-          tags$div(style="flex:1;min-width:0;",
-            tags$div(style="color:#C5D8E8;font-size:0.78em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
-              a$name),
-            tags$a(href=a$url, target="_blank",
-              style=paste0(
-                "display:inline-flex;align-items:center;gap:4px;",
-                "color:#0A66C2;font-size:0.66em;font-weight:600;text-decoration:none;"
-              ),
-              tags$svg(xmlns="http://www.w3.org/2000/svg",viewBox="0 0 24 24",width="10",height="10",
-                style="fill:#0A66C2;flex-shrink:0;",
-                tags$path(d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z")
-              ),
-              "LinkedIn"
-            )
-          )
+        tags$div(style=paste0(
+          "width:28px;height:28px;border-radius:50%;flex-shrink:0;",
+          "background:linear-gradient(135deg,#1B4F72,#2E86AB);",
+          "display:flex;align-items:center;justify-content:center;",
+          "font-size:0.65em;font-weight:800;color:#E8F4FD;"
+        ), a$ini),
+        tags$div(style="flex:1;min-width:0;",
+                 tags$div(style="color:#C5D8E8;font-size:0.78em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;",
+                          a$name),
+                 tags$a(href=a$url, target="_blank",
+                        style=paste0(
+                          "display:inline-flex;align-items:center;gap:4px;",
+                          "color:#0A66C2;font-size:0.66em;font-weight:600;text-decoration:none;"
+                        ),
+                        tags$svg(xmlns="http://www.w3.org/2000/svg",viewBox="0 0 24 24",width="10",height="10",
+                                 style="fill:#0A66C2;flex-shrink:0;",
+                                 tags$path(d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 01-2.063-2.065 2.064 2.064 0 112.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z")
+                        ),
+                        "LinkedIn"
+                 )
+        )
         )
       }))
     )
   ),
-
+  
   dashboardBody(
     tags$head(
       tags$link(rel="preconnect", href="https://fonts.googleapis.com"),
@@ -1188,17 +1281,17 @@ ui <- dashboardPage(
         border-radius: 8px !important; }
       "))
     ),
-
+    
     tabItems(
-
+      
       # =========================================================
       # INTRODUCCION
       # =========================================================
       tabItem(tabName = "intro",
-        fluidRow(column(12,
-          div(class = "intro-hero",
-            # Animated background particles
-            tags$style(HTML("
+              fluidRow(column(12,
+                              div(class = "intro-hero",
+                                  # Animated background particles
+                                  tags$style(HTML("
               .intro-hero { position: relative; overflow: hidden; }
               .hero-particle {
                 position: absolute; border-radius: 50%;
@@ -1240,201 +1333,201 @@ ui <- dashboardPage(
                 100% { filter: drop-shadow(0 0 6px rgba(100,207,246,0.6)); }
               }
             ")),
-            # Floating particles
-            tags$div(class="hero-particle", style="width:80px;height:80px;top:-20px;right:80px;animation-delay:0s;"),
-            tags$div(class="hero-particle", style="width:40px;height:40px;top:10px;right:200px;animation-delay:2s;"),
-            tags$div(class="hero-particle", style="width:60px;height:60px;bottom:-10px;right:120px;animation-delay:1s;"),
-            tags$h2(
-              tags$img(
-                src   = "trophy.png",
-                height = "52",
-                style  = "margin-right:14px;vertical-align:middle;filter:drop-shadow(0 0 10px rgba(245,208,96,0.6));"
+                                  # Floating particles
+                                  tags$div(class="hero-particle", style="width:80px;height:80px;top:-20px;right:80px;animation-delay:0s;"),
+                                  tags$div(class="hero-particle", style="width:40px;height:40px;top:10px;right:200px;animation-delay:2s;"),
+                                  tags$div(class="hero-particle", style="width:60px;height:60px;bottom:-10px;right:120px;animation-delay:1s;"),
+                                  tags$h2(
+                                    tags$img(
+                                      src   = "trophy.png",
+                                      height = "52",
+                                      style  = "margin-right:14px;vertical-align:middle;filter:drop-shadow(0 0 10px rgba(245,208,96,0.6));"
+                                    ),
+                                    "Simulador FIFA World Cup 2026"
+                                  ),
+                                  tags$p(style="margin:0;",
+                                         tags$span(class="hero-tag", "Basado en Ranking FIFA"),
+                                         tags$span(class="hero-sep", "."),
+                                         tags$span(class="hero-tag", "Simula partidos con azar real"),
+                                         tags$span(class="hero-sep", "."),
+                                         tags$span(class="hero-tag", "Hasta 1,000 simulaciones"),
+                                         tags$span(class="hero-sep", "."),
+                                         tags$span(class="hero-tag", "48 equipos"),
+                                         tags$span(class="hero-sep", "."),
+                                         tags$span(class="hero-tag", "12 grupos")
+                                  )
+                              )
+              )),
+              
+              # KPIs estaticos
+              fluidRow(
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("futbol", style="color:#64CFF6;")),
+                              span(class="kpi-val", "48"), span(class="kpi-lab", "Equipos clasificados"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("layer-group", style="color:#F39C12;")),
+                              span(class="kpi-val", "12"), span(class="kpi-lab", "Grupos . 6 confederaciones"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("running", style="color:#1E8449;")),
+                              span(class="kpi-val", "72"), span(class="kpi-lab", "Partidos fase de grupos"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("trophy", style="color:#C0392B;")),
+                              span(class="kpi-val", "32"), span(class="kpi-lab", "Clasificados a Ronda 32")))
               ),
-              "Simulador FIFA World Cup 2026"
-            ),
-            tags$p(style="margin:0;",
-              tags$span(class="hero-tag", "Basado en Ranking FIFA"),
-              tags$span(class="hero-sep", "."),
-              tags$span(class="hero-tag", "Simula partidos con azar real"),
-              tags$span(class="hero-sep", "."),
-              tags$span(class="hero-tag", "Hasta 1,000 simulaciones"),
-              tags$span(class="hero-sep", "."),
-              tags$span(class="hero-tag", "48 equipos"),
-              tags$span(class="hero-sep", "."),
-              tags$span(class="hero-tag", "12 grupos")
-            )
-          )
-        )),
-
-        # KPIs estaticos
-        fluidRow(
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("futbol", style="color:#64CFF6;")),
-            span(class="kpi-val", "48"), span(class="kpi-lab", "Equipos clasificados"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("layer-group", style="color:#F39C12;")),
-            span(class="kpi-val", "12"), span(class="kpi-lab", "Grupos . 6 confederaciones"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("running", style="color:#1E8449;")),
-            span(class="kpi-val", "72"), span(class="kpi-lab", "Partidos fase de grupos"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("trophy", style="color:#C0392B;")),
-            span(class="kpi-val", "32"), span(class="kpi-lab", "Clasificados a Ronda 32")))
-        ),
-
-        fluidRow(column(12,
-          tabsetPanel(type = "tabs",
-            tabPanel("?Como funciona?", br(),
-              fluidRow(
-                column(7,
-                  div(class="info-text",
-                    p("Este simulador recrea la fase de grupos del",
-                      strong("FIFA World Cup 2026."),
-                      "Cada partido se juega con resultados al azar, pero los equipos mejor posicionados",
-                      "en el Ranking FIFA tienen mas probabilidades de ganar - igual que en la realidad.")
-                  ),
-                  div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
-                    tags$h5(icon("futbol", style="color:#64CFF6;margin-right:8px;"),
-                            strong("?Como se decide quien gana?"), style="color:#AED6F1;margin-top:0;"),
-                    tags$ul(
-                      tags$li("Cada seleccion tiene una", strong("fuerza de ataque"), "segun su posicion en el Ranking FIFA."),
-                      tags$li(strong("USA, Canada y Mexico"), "tienen una pequena ventaja por jugar en casa."),
-                      tags$li("El simulador genera goles con azar realista: el mejor equipo anota mas,", strong("pero cualquier sorpresa es posible.")),
-                      tags$li("Puntos: victoria = 3, empate = 1, derrota = 0.")
-                    )
-                  ),
-                  div(style="background:rgba(30,132,73,0.07);border-left:4px solid #1E8449;border-radius:8px;padding:16px 20px;",
-                    tags$h5(icon("trophy", style="color:#1E8449;margin-right:8px;"),
-                            strong("?Quien clasifica?"), style="color:#AED6F1;margin-top:0;"),
-                    p("De cada grupo avanzan los", strong("2 primeros."),
-                      "Ademas, los", strong("8 mejores terceros"), "de todos los grupos tambien pasan.",
-                      "En total:", strong("32 equipos"), "a la Ronda de 16avos.")
-                  )
-                ),
-                column(5,
-                  div(style="background:rgba(243,156,18,0.07);border-left:4px solid #F39C12;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
-                    tags$h5(icon("dice", style="color:#F39C12;margin-right:8px;"),
-                            strong("?Que son las simulaciones multiples?"), style="color:#AED6F1;margin-top:0;"),
-                    p("El simulador puede jugar el torneo completo",
-                      strong("hasta 1,000 veces"), "con resultados distintos.",
-                      "Al final ves", strong("que tan seguido clasifica cada seleccion"),
-                      "-- entre mas alto el porcentaje, mas probable que avance.")
-                  ),
-                  div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;",
-                    tags$h5(icon("map-signs", style="color:#64CFF6;margin-right:8px;"),
-                            strong("Guia rapida"), style="color:#AED6F1;margin-top:0;"),
-                    tags$ol(
-                      tags$li(strong("Grupos"), " - los 12 grupos con banderas y Ranking FIFA."),
-                      tags$li(strong("Simulacion"), " - juega una vez y ve todos los resultados."),
-                      tags$li(strong("Clasificados"), " - quienes pasaron a la Ronda de 16avos."),
-                      tags$li(strong("Probabilidades"), " - corre hasta 1,000 torneos y ve las chances."),
-                      tags$li(strong("Ranking"), " - fuerza de las 48 selecciones.")
-                    )
-                  )
-                )
-              )
-            ),
-
-            tabPanel("Datos del torneo", br(),
-              fluidRow(
-                column(6,
-                  div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
-                    tags$h5(icon("globe", style="color:#64CFF6;margin-right:8px;"),
-                            strong("Paises sede"), style="color:#AED6F1;margin-top:0;"),
-                    tags$div(style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;",
-                      tags$span(style="background:rgba(212,160,23,0.15);border:1px solid rgba(212,160,23,0.3);color:#F5CBA7;padding:6px 14px;border-radius:8px;font-weight:600;font-size:0.9em;",
-                        flag_img("United States"), " Estados Unidos"),
-                      tags$span(style="background:rgba(212,160,23,0.15);border:1px solid rgba(212,160,23,0.3);color:#F5CBA7;padding:6px 14px;border-radius:8px;font-weight:600;font-size:0.9em;",
-                        flag_img("Canada"), " Canada"),
-                      tags$span(style="background:rgba(212,160,23,0.15);border:1px solid rgba(212,160,23,0.3);color:#F5CBA7;padding:6px 14px;border-radius:8px;font-weight:600;font-size:0.9em;",
-                        flag_img("Mexico"), " Mexico")
-                    )
-                  ),
-                  div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;",
-                    tags$h5(icon("calendar", style="color:#64CFF6;margin-right:8px;"),
-                            strong("Formato del torneo"), style="color:#AED6F1;margin-top:0;"),
-                    tags$table(style="width:100%;font-size:0.9em;",
-                      tags$tr(tags$td(strong("Sorteo oficial:")), tags$td("5 de diciembre, 2025")),
-                      tags$tr(tags$td(strong("Formato:")),        tags$td("12 grupos de 4 equipos")),
-                      tags$tr(tags$td(strong("Clasificados:")),   tags$td("32 equipos a la Ronda de 16avos")),
-                      tags$tr(tags$td(strong("Criterio:")),       tags$td("Top 2 por grupo + 8 mejores terceros"))
-                    )
-                  )
-                ),
-                column(6,
-                  div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;",
-                    tags$h5(icon("layer-group", style="color:#64CFF6;margin-right:8px;"),
-                            strong("Regiones representadas"), style="color:#AED6F1;margin-top:0;"),
-                    lapply(list(
-                      list(n="UEFA (Europa)",          c=36, col="#3266ad"),
-                      list(n="CONMEBOL (Sudamerica)",  c=6,  col="#1a7f5a"),
-                      list(n="CONCACAF (N. y C. America)", c=6, col="#d4a017"),
-                      list(n="CAF (Africa)",           c=9,  col="#ba7517"),
-                      list(n="AFC (Asia)",             c=8,  col="#8e44ad"),
-                      list(n="OFC (Oceania)",          c=1,  col="#c0392b")
-                    ), function(r) {
-                      tags$div(style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid rgba(46,134,171,0.1);",
-                        tags$div(style=paste0("width:12px;height:12px;border-radius:50%;flex-shrink:0;background:", r$col, ";")),
-                        tags$span(style="color:#C5D8E8;font-weight:600;font-size:0.88em;flex:1;", r$n),
-                        tags$span(style="color:#64CFF6;font-size:0.82em;font-weight:700;", paste0(r$c, " eq."))
-                      )
-                    })
-                  )
-                )
-              )
-            )
-          )
-        ))
+              
+              fluidRow(column(12,
+                              tabsetPanel(type = "tabs",
+                                          tabPanel("?Como funciona?", br(),
+                                                   fluidRow(
+                                                     column(7,
+                                                            div(class="info-text",
+                                                                p("Este simulador recrea la fase de grupos del",
+                                                                  strong("FIFA World Cup 2026."),
+                                                                  "Cada partido se juega con resultados al azar, pero los equipos mejor posicionados",
+                                                                  "en el Ranking FIFA tienen mas probabilidades de ganar - igual que en la realidad.")
+                                                            ),
+                                                            div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
+                                                                tags$h5(icon("futbol", style="color:#64CFF6;margin-right:8px;"),
+                                                                        strong("?Como se decide quien gana?"), style="color:#AED6F1;margin-top:0;"),
+                                                                tags$ul(
+                                                                  tags$li("Cada seleccion tiene una", strong("fuerza de ataque"), "segun su posicion en el Ranking FIFA."),
+                                                                  tags$li(strong("USA, Canada y Mexico"), "tienen una pequena ventaja por jugar en casa."),
+                                                                  tags$li("El simulador genera goles con azar realista: el mejor equipo anota mas,", strong("pero cualquier sorpresa es posible.")),
+                                                                  tags$li("Puntos: victoria = 3, empate = 1, derrota = 0.")
+                                                                )
+                                                            ),
+                                                            div(style="background:rgba(30,132,73,0.07);border-left:4px solid #1E8449;border-radius:8px;padding:16px 20px;",
+                                                                tags$h5(icon("trophy", style="color:#1E8449;margin-right:8px;"),
+                                                                        strong("?Quien clasifica?"), style="color:#AED6F1;margin-top:0;"),
+                                                                p("De cada grupo avanzan los", strong("2 primeros."),
+                                                                  "Ademas, los", strong("8 mejores terceros"), "de todos los grupos tambien pasan.",
+                                                                  "En total:", strong("32 equipos"), "a la Ronda de 16avos.")
+                                                            )
+                                                     ),
+                                                     column(5,
+                                                            div(style="background:rgba(243,156,18,0.07);border-left:4px solid #F39C12;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
+                                                                tags$h5(icon("dice", style="color:#F39C12;margin-right:8px;"),
+                                                                        strong("?Que son las simulaciones multiples?"), style="color:#AED6F1;margin-top:0;"),
+                                                                p("El simulador puede jugar el torneo completo",
+                                                                  strong("hasta 1,000 veces"), "con resultados distintos.",
+                                                                  "Al final ves", strong("que tan seguido clasifica cada seleccion"),
+                                                                  "-- entre mas alto el porcentaje, mas probable que avance.")
+                                                            ),
+                                                            div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;",
+                                                                tags$h5(icon("map-signs", style="color:#64CFF6;margin-right:8px;"),
+                                                                        strong("Guia rapida"), style="color:#AED6F1;margin-top:0;"),
+                                                                tags$ol(
+                                                                  tags$li(strong("Grupos"), " - los 12 grupos con banderas y Ranking FIFA."),
+                                                                  tags$li(strong("Simulacion"), " - juega una vez y ve todos los resultados."),
+                                                                  tags$li(strong("Clasificados"), " - quienes pasaron a la Ronda de 16avos."),
+                                                                  tags$li(strong("Probabilidades"), " - corre hasta 1,000 torneos y ve las chances."),
+                                                                  tags$li(strong("Ranking"), " - fuerza de las 48 selecciones.")
+                                                                )
+                                                            )
+                                                     )
+                                                   )
+                                          ),
+                                          
+                                          tabPanel("Datos del torneo", br(),
+                                                   fluidRow(
+                                                     column(6,
+                                                            div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
+                                                                tags$h5(icon("globe", style="color:#64CFF6;margin-right:8px;"),
+                                                                        strong("Paises sede"), style="color:#AED6F1;margin-top:0;"),
+                                                                tags$div(style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px;",
+                                                                         tags$span(style="background:rgba(212,160,23,0.15);border:1px solid rgba(212,160,23,0.3);color:#F5CBA7;padding:6px 14px;border-radius:8px;font-weight:600;font-size:0.9em;",
+                                                                                   flag_img("United States"), " Estados Unidos"),
+                                                                         tags$span(style="background:rgba(212,160,23,0.15);border:1px solid rgba(212,160,23,0.3);color:#F5CBA7;padding:6px 14px;border-radius:8px;font-weight:600;font-size:0.9em;",
+                                                                                   flag_img("Canada"), " Canada"),
+                                                                         tags$span(style="background:rgba(212,160,23,0.15);border:1px solid rgba(212,160,23,0.3);color:#F5CBA7;padding:6px 14px;border-radius:8px;font-weight:600;font-size:0.9em;",
+                                                                                   flag_img("Mexico"), " Mexico")
+                                                                )
+                                                            ),
+                                                            div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;",
+                                                                tags$h5(icon("calendar", style="color:#64CFF6;margin-right:8px;"),
+                                                                        strong("Formato del torneo"), style="color:#AED6F1;margin-top:0;"),
+                                                                tags$table(style="width:100%;font-size:0.9em;",
+                                                                           tags$tr(tags$td(strong("Sorteo oficial:")), tags$td("5 de diciembre, 2025")),
+                                                                           tags$tr(tags$td(strong("Formato:")),        tags$td("12 grupos de 4 equipos")),
+                                                                           tags$tr(tags$td(strong("Clasificados:")),   tags$td("32 equipos a la Ronda de 16avos")),
+                                                                           tags$tr(tags$td(strong("Criterio:")),       tags$td("Top 2 por grupo + 8 mejores terceros"))
+                                                                )
+                                                            )
+                                                     ),
+                                                     column(6,
+                                                            div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;",
+                                                                tags$h5(icon("layer-group", style="color:#64CFF6;margin-right:8px;"),
+                                                                        strong("Regiones representadas"), style="color:#AED6F1;margin-top:0;"),
+                                                                lapply(list(
+                                                                  list(n="UEFA (Europa)",          c=36, col="#3266ad"),
+                                                                  list(n="CONMEBOL (Sudamerica)",  c=6,  col="#1a7f5a"),
+                                                                  list(n="CONCACAF (N. y C. America)", c=6, col="#d4a017"),
+                                                                  list(n="CAF (Africa)",           c=9,  col="#ba7517"),
+                                                                  list(n="AFC (Asia)",             c=8,  col="#8e44ad"),
+                                                                  list(n="OFC (Oceania)",          c=1,  col="#c0392b")
+                                                                ), function(r) {
+                                                                  tags$div(style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid rgba(46,134,171,0.1);",
+                                                                           tags$div(style=paste0("width:12px;height:12px;border-radius:50%;flex-shrink:0;background:", r$col, ";")),
+                                                                           tags$span(style="color:#C5D8E8;font-weight:600;font-size:0.88em;flex:1;", r$n),
+                                                                           tags$span(style="color:#64CFF6;font-size:0.82em;font-weight:700;", paste0(r$c, " eq."))
+                                                                  )
+                                                                })
+                                                            )
+                                                     )
+                                                   )
+                                          )
+                              )
+              ))
       ), # fin intro
-
-
+      
+      
       tabItem(tabName = "grupos",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("layer-group", style="margin-right:10px;font-size:1.2em;"),
-          "Grupos Oficiales - FIFA World Cup 2026"
-        ))),
-
-        # Cards de grupos: 4 por fila, 3 filas
-        do.call(tagList, lapply(seq(1, 12, by=4), function(start_idx) {
-          grp_names <- names(GROUPS_DATA)[start_idx:min(start_idx+3, 12)]
-          fluidRow(lapply(grp_names, function(grp) {
-            teams <- GROUPS_DATA[[grp]]
-            column(3,
-              div(class="group-card",
-                # Encabezado del grupo con columna Pts. FIFA
-                div(style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(46,134,171,0.3);padding-bottom:8px;margin-bottom:8px;",
-                  tags$span(class="group-title", style="margin:0;border:none;padding:0;font-size:1em;", paste("Grupo", grp)),
-                  tags$span(style="color:#64CFF6;font-size:0.68em;font-weight:700;text-transform:uppercase;letter-spacing:1px;", "Pts. FIFA")
-                ),
-                lapply(teams, function(t) {
-                  fpts    <- { v <- ts_get(t, "fifa_points"); if (is.na(v)) 1400 else v }
-                  is_host <- t %in% HOST_COUNTRIES
-                  div(class="team-row",
-                    flag_img(t),
-                    div(class="team-name", t,
-                        if (is_host) tags$span(class="host-badge", style="margin-left:6px;", "SEDE")),
-                    tags$span(class="team-pts", formatC(fpts, format="d"))
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("layer-group", style="margin-right:10px;font-size:1.2em;"),
+                                      "Grupos Oficiales - FIFA World Cup 2026"
+              ))),
+              
+              # Cards de grupos: 4 por fila, 3 filas
+              do.call(tagList, lapply(seq(1, 12, by=4), function(start_idx) {
+                grp_names <- names(GROUPS_DATA)[start_idx:min(start_idx+3, 12)]
+                fluidRow(lapply(grp_names, function(grp) {
+                  teams <- GROUPS_DATA[[grp]]
+                  column(3,
+                         div(class="group-card",
+                             # Encabezado del grupo con columna Pts. FIFA
+                             div(style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(46,134,171,0.3);padding-bottom:8px;margin-bottom:8px;",
+                                 tags$span(class="group-title", style="margin:0;border:none;padding:0;font-size:1em;", paste("Grupo", grp)),
+                                 tags$span(style="color:#64CFF6;font-size:0.68em;font-weight:700;text-transform:uppercase;letter-spacing:1px;", "Pts. FIFA")
+                             ),
+                             lapply(teams, function(t) {
+                               fpts    <- { v <- ts_get(t, "fifa_points"); if (is.na(v)) 1400 else v }
+                               is_host <- t %in% HOST_COUNTRIES
+                               div(class="team-row",
+                                   flag_img(t),
+                                   div(class="team-name", t,
+                                       if (is_host) tags$span(class="host-badge", style="margin-left:6px;", "SEDE")),
+                                   tags$span(class="team-pts", formatC(fpts, format="d"))
+                               )
+                             })
+                         )
                   )
-                })
-              )
-            )
-          }))
-        }))
+                }))
+              }))
       ), # fin grupos
-
-
+      
+      
       # =========================================================
       # SIMULACION
       # =========================================================
       tabItem(tabName = "simulacion",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("play-circle", style="margin-right:10px;font-size:1.2em;"),
-          "Simulacion . Fase de Grupos"
-        ))),
-
-        # Panel de control redisenado
-        fluidRow(column(12,
-          tags$style(HTML("
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("play-circle", style="margin-right:10px;font-size:1.2em;"),
+                                      "Simulacion . Fase de Grupos"
+              ))),
+              
+              # Panel de control redisenado
+              fluidRow(column(12,
+                              tags$style(HTML("
             .sim-control-panel {
               background: linear-gradient(135deg, #081424 0%, #0D1F3C 60%, #0A1A2E 100%);
               border: 1px solid rgba(100,207,246,0.25);
@@ -1484,58 +1577,58 @@ ui <- dashboardPage(
             .sim-hint { color: #4A7A9B; font-size: 0.8em; line-height: 1.5; margin-top: 4px; }
             .sim-hint strong { color: #8BAEC8; }
           ")),
-          div(class="sim-control-panel",
-            fluidRow(
-              # Seed picker
-              column(4,
-                div(class="seed-label", icon("dice", style="margin-right:6px;"), "Numero de torneo"),
-                div(class="seed-wrapper",
-                  div(class="seed-input-styled",
-                    numericInput("sim_seed", label=NULL, value=42, min=1, max=99999, step=1,
-                                 width="130px")
-                  ),
-                  actionButton("btn_seed_random", label=NULL, icon=icon("random"),
-                               class="seed-dice-btn",
-                               title="Generar numero al azar")
-                ),
-                p(class="sim-hint",
-                  "Cada numero genera un", strong("torneo diferente."),
-                  br(), "Cambia el numero y vuelve a simular.")
-              ),
-              # Boton simular
-              column(4,
-                div(style="display:flex;flex-direction:column;justify-content:center;height:100%;padding-top:6px;",
-                  actionButton("btn_simular",
-                    tagList(icon("play"), tags$span(style="margin-left:8px;font-weight:700;font-size:1.05em;", "Simular torneo")),
-                    class="btn-sim btn btn-primary",
-                    style="width:100%;padding:16px !important;font-size:1em !important;"
-                  )
-                )
-              ),
-              # Info rapida
-              column(4,
-                div(style="border-left:2px solid rgba(46,134,171,0.3);padding-left:18px;height:100%;display:flex;flex-direction:column;justify-content:center;",
-                  div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
-                    tags$span(style="background:rgba(30,132,73,0.2);color:#1E8449;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:800;flex-shrink:0;", "1"),
-                    tags$span(style="color:#8BAEC8;font-size:0.82em;", "Elige o cambia el numero de torneo")
-                  ),
-                  div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
-                    tags$span(style="background:rgba(100,207,246,0.15);color:#64CFF6;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:800;flex-shrink:0;", "2"),
-                    tags$span(style="color:#8BAEC8;font-size:0.82em;", "Presiona", strong(style="color:#64CFF6;", " Simular torneo"))
-                  ),
-                  div(style="display:flex;align-items:center;gap:8px;",
-                    tags$span(style="background:rgba(243,156,18,0.15);color:#F39C12;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:800;flex-shrink:0;", "3"),
-                    tags$span(style="color:#8BAEC8;font-size:0.82em;", "Ve los resultados y tablas")
-                  )
-                )
-              )
-            )
-          )
-        )),
-
-        # Sub-pestanas de resultados
-        fluidRow(column(12,
-          tags$style(HTML("
+                              div(class="sim-control-panel",
+                                  fluidRow(
+                                    # Seed picker
+                                    column(4,
+                                           div(class="seed-label", icon("dice", style="margin-right:6px;"), "Numero de torneo"),
+                                           div(class="seed-wrapper",
+                                               div(class="seed-input-styled",
+                                                   numericInput("sim_seed", label=NULL, value=42, min=1, max=99999, step=1,
+                                                                width="130px")
+                                               ),
+                                               actionButton("btn_seed_random", label=NULL, icon=icon("random"),
+                                                            class="seed-dice-btn",
+                                                            title="Generar numero al azar")
+                                           ),
+                                           p(class="sim-hint",
+                                             "Cada numero genera un", strong("torneo diferente."),
+                                             br(), "Cambia el numero y vuelve a simular.")
+                                    ),
+                                    # Boton simular
+                                    column(4,
+                                           div(style="display:flex;flex-direction:column;justify-content:center;height:100%;padding-top:6px;",
+                                               actionButton("btn_simular",
+                                                            tagList(icon("play"), tags$span(style="margin-left:8px;font-weight:700;font-size:1.05em;", "Simular torneo")),
+                                                            class="btn-sim btn btn-primary",
+                                                            style="width:100%;padding:16px !important;font-size:1em !important;"
+                                               )
+                                           )
+                                    ),
+                                    # Info rapida
+                                    column(4,
+                                           div(style="border-left:2px solid rgba(46,134,171,0.3);padding-left:18px;height:100%;display:flex;flex-direction:column;justify-content:center;",
+                                               div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                   tags$span(style="background:rgba(30,132,73,0.2);color:#1E8449;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:800;flex-shrink:0;", "1"),
+                                                   tags$span(style="color:#8BAEC8;font-size:0.82em;", "Elige o cambia el numero de torneo")
+                                               ),
+                                               div(style="display:flex;align-items:center;gap:8px;margin-bottom:8px;",
+                                                   tags$span(style="background:rgba(100,207,246,0.15);color:#64CFF6;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:800;flex-shrink:0;", "2"),
+                                                   tags$span(style="color:#8BAEC8;font-size:0.82em;", "Presiona", strong(style="color:#64CFF6;", " Simular torneo"))
+                                               ),
+                                               div(style="display:flex;align-items:center;gap:8px;",
+                                                   tags$span(style="background:rgba(243,156,18,0.15);color:#F39C12;border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:0.8em;font-weight:800;flex-shrink:0;", "3"),
+                                                   tags$span(style="color:#8BAEC8;font-size:0.82em;", "Ve los resultados y tablas")
+                                               )
+                                           )
+                                    )
+                                  )
+                              )
+              )),
+              
+              # Sub-pestanas de resultados
+              fluidRow(column(12,
+                              tags$style(HTML("
             /* Sub-tabs styling */
             .sim-subtabs .nav-tabs {
               border-bottom: 2px solid rgba(46,134,171,0.3) !important;
@@ -1563,166 +1656,166 @@ ui <- dashboardPage(
               border-top: 2px solid #64CFF6 !important;
             }
           ")),
-          div(class="sim-subtabs",
-            tabsetPanel(type="tabs", id="sim_subtabs",
-              tabPanel(
-                tagList(icon("table", style="margin-right:6px;"), "Tablas por grupo"),
-                br(),
-                uiOutput("sim_standings_ui")
-              ),
-              tabPanel(
-                tagList(icon("futbol", style="margin-right:6px;"), "Resultados por jornada"),
-                br(),
-                uiOutput("sim_jornadas_ui")
-              )
-            )
-          )
-        ))
+                              div(class="sim-subtabs",
+                                  tabsetPanel(type="tabs", id="sim_subtabs",
+                                              tabPanel(
+                                                tagList(icon("table", style="margin-right:6px;"), "Tablas por grupo"),
+                                                br(),
+                                                uiOutput("sim_standings_ui")
+                                              ),
+                                              tabPanel(
+                                                tagList(icon("futbol", style="margin-right:6px;"), "Resultados por jornada"),
+                                                br(),
+                                                uiOutput("sim_jornadas_ui")
+                                              )
+                                  )
+                              )
+              ))
       ), # fin simulacion
-
-
+      
+      
       # =========================================================
       # CLASIFICADOS
       # =========================================================
       tabItem(tabName = "clasificados",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("trophy", style="margin-right:10px;font-size:1.2em;"),
-          "Clasificados - Ronda de 16avos"
-        ))),
-
-        # Banner de advertencia (visible solo si no hay simulacion)
-        uiOutput("clasificados_banner_ui"),
-        fluidRow(
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("medal", style="color:#F39C12;")),
-            span(class="kpi-val", uiOutput("kpi_primeros")),
-            span(class="kpi-lab", "Primeros de grupo"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("medal", style="color:#AED6F1;")),
-            span(class="kpi-val", uiOutput("kpi_segundos")),
-            span(class="kpi-lab", "Segundos de grupo"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("medal", style="color:#8E44AD;")),
-            span(class="kpi-val", uiOutput("kpi_terceros")),
-            span(class="kpi-lab", "Mejores terceros"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("futbol", style="color:#1E8449;")),
-            span(class="kpi-val", uiOutput("kpi_total_qual")),
-            span(class="kpi-lab", "Total clasificados")))
-        ),
-
-        # -- RESULTADOS PRIMERO: tabla de clasificados --
-        fluidRow(column(12,
-          box(width=12, status="primary", solidHeader=TRUE,
-              title=tags$span(icon("trophy", style="margin-right:8px;"), "Los 32 clasificados"),
-            uiOutput("clasificados_tabla_ui")
-          )
-        )),
-
-        # -- TERCEROS --
-        fluidRow(column(12,
-          box(width=12, status="warning", solidHeader=TRUE,
-              title=tags$span(icon("sort-amount-down", style="margin-right:8px;"), "Batalla de los 12 terceros - solo 8 pasan"),
-            div(style="color:#8BAEC8;font-size:0.85em;margin-bottom:12px;",
-              icon("info-circle", style="color:#F39C12;margin-right:6px;"),
-              "De cada grupo, el tercer lugar compite con los otros once terceros.",
-              strong(" Solo los 8 mejor ubicados"), " avanzan a la Ronda de 16avos. Un solo punto o gol puede hacer la diferencia."
-            ),
-            DTOutput("thirds_tabla")
-          )
-        )),
-
-        # -- GRAFICO ABAJO --
-        fluidRow(column(12,
-          box(width=12, status="info", solidHeader=TRUE,
-              title=tags$span(icon("chart-pie", style="margin-right:8px;"), "Clasificados por region del mundo"),
-            plotlyOutput("plot_conf_qual", height="320px")
-          )
-        ))
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("trophy", style="margin-right:10px;font-size:1.2em;"),
+                                      "Clasificados - Ronda de 16avos"
+              ))),
+              
+              # Banner de advertencia (visible solo si no hay simulacion)
+              uiOutput("clasificados_banner_ui"),
+              fluidRow(
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("medal", style="color:#F39C12;")),
+                              span(class="kpi-val", uiOutput("kpi_primeros")),
+                              span(class="kpi-lab", "Primeros de grupo"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("medal", style="color:#AED6F1;")),
+                              span(class="kpi-val", uiOutput("kpi_segundos")),
+                              span(class="kpi-lab", "Segundos de grupo"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("medal", style="color:#8E44AD;")),
+                              span(class="kpi-val", uiOutput("kpi_terceros")),
+                              span(class="kpi-lab", "Mejores terceros"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("futbol", style="color:#1E8449;")),
+                              span(class="kpi-val", uiOutput("kpi_total_qual")),
+                              span(class="kpi-lab", "Total clasificados")))
+              ),
+              
+              # -- RESULTADOS PRIMERO: tabla de clasificados --
+              fluidRow(column(12,
+                              box(width=12, status="primary", solidHeader=TRUE,
+                                  title=tags$span(icon("trophy", style="margin-right:8px;"), "Los 32 clasificados"),
+                                  uiOutput("clasificados_tabla_ui")
+                              )
+              )),
+              
+              # -- TERCEROS --
+              fluidRow(column(12,
+                              box(width=12, status="warning", solidHeader=TRUE,
+                                  title=tags$span(icon("sort-amount-down", style="margin-right:8px;"), "Batalla de los 12 terceros - solo 8 pasan"),
+                                  div(style="color:#8BAEC8;font-size:0.85em;margin-bottom:12px;",
+                                      icon("info-circle", style="color:#F39C12;margin-right:6px;"),
+                                      "De cada grupo, el tercer lugar compite con los otros once terceros.",
+                                      strong(" Solo los 8 mejor ubicados"), " avanzan a la Ronda de 16avos. Un solo punto o gol puede hacer la diferencia."
+                                  ),
+                                  DTOutput("thirds_tabla")
+                              )
+              )),
+              
+              # -- GRAFICO ABAJO --
+              fluidRow(column(12,
+                              box(width=12, status="info", solidHeader=TRUE,
+                                  title=tags$span(icon("chart-pie", style="margin-right:8px;"), "Clasificados por region del mundo"),
+                                  plotlyOutput("plot_conf_qual", height="320px")
+                              )
+              ))
       ), # fin clasificados
-
-
+      
+      
       # =========================================================
       # MONTE CARLO
       # =========================================================
       tabItem(tabName = "montecarlo",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("dice", style="margin-right:10px;font-size:1.2em;"),
-          "Probabilidades de clasificar"
-        ))),
-
-        # Control panel
-        fluidRow(column(12,
-          div(class="sim-control-panel",
-            fluidRow(
-              column(4,
-                div(class="seed-label", icon("sliders-h", style="margin-right:6px;"), "Numero de torneos a simular"),
-                sliderInput("mc_nsims", label=NULL, min=100, max=1000, value=500, step=100, width="100%"),
-                p(class="sim-hint", "Mas torneos =", strong("mas precision."), "500 es un buen balance.")
-              ),
-              column(4,
-                div(style="display:flex;flex-direction:column;justify-content:center;height:100%;padding-top:6px;",
-                  actionButton("btn_mc",
-                    tagList(icon("dice"), tags$span(style="margin-left:8px;font-weight:700;font-size:1.05em;", "Calcular probabilidades")),
-                    class="btn-sim btn btn-primary",
-                    style="width:100%;padding:16px !important;"
-                  )
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("dice", style="margin-right:10px;font-size:1.2em;"),
+                                      "Probabilidades de clasificar"
+              ))),
+              
+              # Control panel
+              fluidRow(column(12,
+                              div(class="sim-control-panel",
+                                  fluidRow(
+                                    column(4,
+                                           div(class="seed-label", icon("sliders-h", style="margin-right:6px;"), "Numero de torneos a simular"),
+                                           sliderInput("mc_nsims", label=NULL, min=100, max=1000, value=500, step=100, width="100%"),
+                                           p(class="sim-hint", "Mas torneos =", strong("mas precision."), "500 es un buen balance.")
+                                    ),
+                                    column(4,
+                                           div(style="display:flex;flex-direction:column;justify-content:center;height:100%;padding-top:6px;",
+                                               actionButton("btn_mc",
+                                                            tagList(icon("dice"), tags$span(style="margin-left:8px;font-weight:700;font-size:1.05em;", "Calcular probabilidades")),
+                                                            class="btn-sim btn btn-primary",
+                                                            style="width:100%;padding:16px !important;"
+                                               )
+                                           )
+                                    ),
+                                    column(4,
+                                           div(style="border-left:2px solid rgba(46,134,171,0.3);padding-left:18px;height:100%;display:flex;flex-direction:column;justify-content:center;",
+                                               div(style="color:#8BAEC8;font-size:0.82em;line-height:1.7;",
+                                                   icon("circle", style="color:#1E8449;font-size:0.6em;margin-right:6px;"),
+                                                   strong(style="color:#1E8449;", "Verde"), " = clasifica mas del 70% de las veces", br(),
+                                                   icon("circle", style="color:#2E86AB;font-size:0.6em;margin-right:6px;"),
+                                                   strong(style="color:#2E86AB;", "Azul"), " = clasifica entre 40% y 70%", br(),
+                                                   icon("circle", style="color:#1B4F72;font-size:0.6em;margin-right:6px;"),
+                                                   strong(style="color:#4A7A9B;", "Oscuro"), " = clasifica menos del 40%"
+                                               )
+                                           )
+                                    )
+                                  )
+                              )
+              )),
+              
+              uiOutput("mc_progress_ui"),
+              
+              # -- RESULTADOS PRIMERO --
+              fluidRow(
+                box(width=6, status="warning", solidHeader=TRUE,
+                    title=tags$span(icon("table", style="margin-right:8px;"), "Tabla de probabilidades - todos los equipos"),
+                    DTOutput("mc_tabla")
+                ),
+                box(width=6, status="info", solidHeader=TRUE,
+                    title=tags$span(icon("layer-group", style="margin-right:8px;"), "Probabilidad promedio por region"),
+                    plotlyOutput("plot_mc_conf", height="340px")
                 )
               ),
-              column(4,
-                div(style="border-left:2px solid rgba(46,134,171,0.3);padding-left:18px;height:100%;display:flex;flex-direction:column;justify-content:center;",
-                  div(style="color:#8BAEC8;font-size:0.82em;line-height:1.7;",
-                    icon("circle", style="color:#1E8449;font-size:0.6em;margin-right:6px;"),
-                    strong(style="color:#1E8449;", "Verde"), " = clasifica mas del 70% de las veces", br(),
-                    icon("circle", style="color:#2E86AB;font-size:0.6em;margin-right:6px;"),
-                    strong(style="color:#2E86AB;", "Azul"), " = clasifica entre 40% y 70%", br(),
-                    icon("circle", style="color:#1B4F72;font-size:0.6em;margin-right:6px;"),
-                    strong(style="color:#4A7A9B;", "Oscuro"), " = clasifica menos del 40%"
-                  )
+              
+              # -- GRAFICO + TABLA LATERAL --
+              fluidRow(
+                box(width=8, status="info", solidHeader=TRUE,
+                    title=tags$span(icon("chart-bar", style="margin-right:8px;"), "Probabilidad de clasificar - las 48 selecciones"),
+                    plotlyOutput("plot_mc_probs", height="680px")
+                ),
+                box(width=4, status="primary", solidHeader=TRUE,
+                    title=tags$span(icon("list-ol", style="margin-right:8px;"), "Ranking de probabilidades"),
+                    uiOutput("mc_prob_list_ui")
                 )
               )
-            )
-          )
-        )),
-
-        uiOutput("mc_progress_ui"),
-
-        # -- RESULTADOS PRIMERO --
-        fluidRow(
-          box(width=6, status="warning", solidHeader=TRUE,
-              title=tags$span(icon("table", style="margin-right:8px;"), "Tabla de probabilidades - todos los equipos"),
-            DTOutput("mc_tabla")
-          ),
-          box(width=6, status="info", solidHeader=TRUE,
-              title=tags$span(icon("layer-group", style="margin-right:8px;"), "Probabilidad promedio por region"),
-            plotlyOutput("plot_mc_conf", height="340px")
-          )
-        ),
-
-        # -- GRAFICO + TABLA LATERAL --
-        fluidRow(
-          box(width=8, status="info", solidHeader=TRUE,
-              title=tags$span(icon("chart-bar", style="margin-right:8px;"), "Probabilidad de clasificar - las 48 selecciones"),
-            plotlyOutput("plot_mc_probs", height="680px")
-          ),
-          box(width=4, status="primary", solidHeader=TRUE,
-              title=tags$span(icon("list-ol", style="margin-right:8px;"), "Ranking de probabilidades"),
-            uiOutput("mc_prob_list_ui")
-          )
-        )
       ), # fin montecarlo
-
-
+      
+      
       # =========================================================
       # ELIMINACION DIRECTA
       # =========================================================
       tabItem(tabName = "campeon",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("crown", style="margin-right:10px;font-size:1.2em;color:#F5D060;"),
-          "Eliminacion Directa - Simulador de Campeon"
-        ))),
-
-        tags$style(HTML("
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("crown", style="margin-right:10px;font-size:1.2em;color:#F5D060;"),
+                                      "Eliminacion Directa - Simulador de Campeon"
+              ))),
+              
+              tags$style(HTML("
           .champ-panel {
             background:linear-gradient(135deg,#081424,#0D1F3C);
             border:1px solid rgba(245,208,96,0.25);
@@ -1790,116 +1883,116 @@ ui <- dashboardPage(
           }
           .prob-champ-row:hover { background:rgba(46,134,171,0.1); }
         ")),
-
-        # -- CONTROL PANEL --
-        fluidRow(column(12,
-          div(class="champ-panel",
-            fluidRow(
-              column(3,
-                div(class="seed-label", style="color:#F5D060;",
-                  icon("sliders-h", style="margin-right:5px;"), "Simulaciones"),
-                sliderInput("champ_nsims", label=NULL,
-                  min=100, max=1000, value=300, step=100, width="100%"),
-                p(class="sim-hint", "Mas simulaciones =", strong("mas precision."))
-              ),
-              column(3, div(style="height:100%;display:flex;align-items:center;padding-top:6px;",
-                actionButton("btn_campeon",
-                  tagList(icon("crown"),
-                    tags$span(style="margin-left:8px;font-weight:800;font-size:1em;",
-                      "Simular Campeon")),
-                  class="btn-sim btn btn-primary",
-                  style=paste0(
-                    "width:100%;padding:14px !important;",
-                    "background:linear-gradient(135deg,#8B6914,#C8960C,#F5D060) !important;",
-                    "color:#0D1F3C !important;font-weight:900 !important;"
-                  )
-                )
+              
+              # -- CONTROL PANEL --
+              fluidRow(column(12,
+                              div(class="champ-panel",
+                                  fluidRow(
+                                    column(3,
+                                           div(class="seed-label", style="color:#F5D060;",
+                                               icon("sliders-h", style="margin-right:5px;"), "Simulaciones"),
+                                           sliderInput("champ_nsims", label=NULL,
+                                                       min=100, max=1000, value=300, step=100, width="100%"),
+                                           p(class="sim-hint", "Mas simulaciones =", strong("mas precision."))
+                                    ),
+                                    column(3, div(style="height:100%;display:flex;align-items:center;padding-top:6px;",
+                                                  actionButton("btn_campeon",
+                                                               tagList(icon("crown"),
+                                                                       tags$span(style="margin-left:8px;font-weight:800;font-size:1em;",
+                                                                                 "Simular Campeon")),
+                                                               class="btn-sim btn btn-primary",
+                                                               style=paste0(
+                                                                 "width:100%;padding:14px !important;",
+                                                                 "background:linear-gradient(135deg,#8B6914,#C8960C,#F5D060) !important;",
+                                                                 "color:#0D1F3C !important;font-weight:900 !important;"
+                                                               )
+                                                  )
+                                    )),
+                                    column(6,
+                                           div(style=paste0(
+                                             "background:rgba(46,134,171,0.06);border:1px solid rgba(46,134,171,0.18);",
+                                             "border-left:4px solid #64CFF6;border-radius:10px;padding:16px 20px;"
+                                           ),
+                                           tags$div(style="color:#64CFF6;font-size:0.72em;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;",
+                                                    icon("question-circle", style="margin-right:5px;"), "Como funciona?"),
+                                           lapply(list(
+                                             list("1","Fase de grupos:","72 partidos con azar basado en Ranking FIFA. Los 32 mejores clasifican a eliminacion directa."),
+                                             list("2","Bracket KO:","Si hay empate al 90 min, tiempo extra. Si sigue igual, penales. El mas fuerte tiene ventaja pero cualquiera puede ganar."),
+                                             list("3","Repeticion N veces:","El torneo completo se juega N veces. El porcentaje = cuantas veces fue campeon esa seleccion.")
+                                           ), function(step) {
+                                             div(style="display:flex;align-items:flex-start;gap:12px;margin-bottom:10px;",
+                                                 div(style=paste0(
+                                                   "background:rgba(100,207,246,0.15);color:#64CFF6;",
+                                                   "border-radius:50%;width:24px;height:24px;flex-shrink:0;",
+                                                   "display:flex;align-items:center;justify-content:center;",
+                                                   "font-size:0.72em;font-weight:800;"
+                                                 ), step[[1]]),
+                                                 div(style="color:#8BAEC8;font-size:0.84em;line-height:1.5;",
+                                                     strong(style="color:#C5D8E8;", step[[2]]), " ", step[[3]])
+                                             )
+                                           })
+                                           )
+                                    )
+                                  )
+                              )
               )),
-              column(6,
-                div(style=paste0(
-                  "background:rgba(46,134,171,0.06);border:1px solid rgba(46,134,171,0.18);",
-                  "border-left:4px solid #64CFF6;border-radius:10px;padding:16px 20px;"
-                ),
-                  tags$div(style="color:#64CFF6;font-size:0.72em;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:12px;",
-                    icon("question-circle", style="margin-right:5px;"), "Como funciona?"),
-                  lapply(list(
-                    list("1","Fase de grupos:","72 partidos con azar basado en Ranking FIFA. Los 32 mejores clasifican a eliminacion directa."),
-                    list("2","Bracket KO:","Si hay empate al 90 min, tiempo extra. Si sigue igual, penales. El mas fuerte tiene ventaja pero cualquiera puede ganar."),
-                    list("3","Repeticion N veces:","El torneo completo se juega N veces. El porcentaje = cuantas veces fue campeon esa seleccion.")
-                  ), function(step) {
-                    div(style="display:flex;align-items:flex-start;gap:12px;margin-bottom:10px;",
-                      div(style=paste0(
-                        "background:rgba(100,207,246,0.15);color:#64CFF6;",
-                        "border-radius:50%;width:24px;height:24px;flex-shrink:0;",
-                        "display:flex;align-items:center;justify-content:center;",
-                        "font-size:0.72em;font-weight:800;"
-                      ), step[[1]]),
-                      div(style="color:#8BAEC8;font-size:0.84em;line-height:1.5;",
-                        strong(style="color:#C5D8E8;", step[[2]]), " ", step[[3]])
-                    )
-                  })
-                )
-              )
-            )
-          )
-        )),
-
-        uiOutput("campeon_ui")
+              
+              uiOutput("campeon_ui")
       ), # fin campeon
       # =========================================================
       # VARIABLES / STRENGTH SCORE
       # =========================================================
-
+      
       # =========================================================
       # VARIABLES / STRENGTH SCORE
       # =========================================================
       tabItem(tabName = "variables",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("chart-bar", style="margin-right:10px;font-size:1.2em;"),
-          "Ranking de fuerza - 48 selecciones"
-        ))),
-
-        fluidRow(
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("star", style="color:#64CFF6;")),
-            span(class="kpi-val", uiOutput("kpi_max_score")),
-            span(class="kpi-lab", "Puntaje del equipo mas fuerte"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("futbol", style="color:#F39C12;")),
-            span(class="kpi-val", uiOutput("kpi_mean_lambda")),
-            span(class="kpi-lab", "Goles esperados por partido"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("trophy", style="color:#1E8449;")),
-            span(class="kpi-val", uiOutput("kpi_top_team")),
-            span(class="kpi-lab", "Seleccion mejor rankeada"))),
-          column(3, div(class="kpi-box",
-            div(class="kpi-icon", icon("globe", style="color:#8E44AD;")),
-            span(class="kpi-val", "6"),
-            span(class="kpi-lab", "Regiones del mundo")))
-        ),
-
-        fluidRow(
-          box(width=8, status="primary", solidHeader=TRUE,
-              title=tags$span(icon("sort-amount-down", style="margin-right:8px;"), "Poder ofensivo - 48 selecciones"),
-            plotlyOutput("plot_strength_score", height="560px")
-          ),
-          box(width=4, status="warning", solidHeader=TRUE,
-              title=tags$span(icon("futbol", style="margin-right:8px;"), "Goles esperados por partido"),
-            div(style="color:#8BAEC8;font-size:0.8em;margin-bottom:10px;",
-              icon("info-circle", style="color:#64CFF6;margin-right:5px;"),
-              "Goles que cada seleccion", strong("promedia por partido"), "segun su Ranking FIFA.",
-              "Mas goles = equipo mas peligroso."
-            ),
-            uiOutput("xg_list_ui")
-          )
-        ),
-
-        fluidRow(column(12,
-          div(class="page-header-strip", style="margin-bottom:16px;",
-            icon("layer-group", style="margin-right:10px;"),
-            "Estadisticas por grupo - las 48 selecciones"
-          ),
-          tags$style(HTML("
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("chart-bar", style="margin-right:10px;font-size:1.2em;"),
+                                      "Ranking de fuerza - 48 selecciones"
+              ))),
+              
+              fluidRow(
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("star", style="color:#64CFF6;")),
+                              span(class="kpi-val", uiOutput("kpi_max_score")),
+                              span(class="kpi-lab", "Puntaje del equipo mas fuerte"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("futbol", style="color:#F39C12;")),
+                              span(class="kpi-val", uiOutput("kpi_mean_lambda")),
+                              span(class="kpi-lab", "Goles esperados por partido"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("trophy", style="color:#1E8449;")),
+                              span(class="kpi-val", uiOutput("kpi_top_team")),
+                              span(class="kpi-lab", "Seleccion mejor rankeada"))),
+                column(3, div(class="kpi-box",
+                              div(class="kpi-icon", icon("globe", style="color:#8E44AD;")),
+                              span(class="kpi-val", "6"),
+                              span(class="kpi-lab", "Regiones del mundo")))
+              ),
+              
+              fluidRow(
+                box(width=8, status="primary", solidHeader=TRUE,
+                    title=tags$span(icon("sort-amount-down", style="margin-right:8px;"), "Poder ofensivo - 48 selecciones"),
+                    plotlyOutput("plot_strength_score", height="560px")
+                ),
+                box(width=4, status="warning", solidHeader=TRUE,
+                    title=tags$span(icon("futbol", style="margin-right:8px;"), "Goles esperados por partido"),
+                    div(style="color:#8BAEC8;font-size:0.8em;margin-bottom:10px;",
+                        icon("info-circle", style="color:#64CFF6;margin-right:5px;"),
+                        "Goles que cada seleccion", strong("promedia por partido"), "segun su Ranking FIFA.",
+                        "Mas goles = equipo mas peligroso."
+                    ),
+                    uiOutput("xg_list_ui")
+                )
+              ),
+              
+              fluidRow(column(12,
+                              div(class="page-header-strip", style="margin-bottom:16px;",
+                                  icon("layer-group", style="margin-right:10px;"),
+                                  "Estadisticas por grupo - las 48 selecciones"
+                              ),
+                              tags$style(HTML("
             .stats-group-grid {
               display: grid;
               grid-template-columns: repeat(4, 1fr);
@@ -1955,148 +2048,261 @@ ui <- dashboardPage(
             }
             .stats-bar-fill { height:5px; border-radius:3px; }
           ")),
-          {
-            # Precompute group + stats
-            ts <- TEAM_STATS
-            ts$grupo <- sapply(ts$team, function(t) {
-              for (g in names(GROUPS_DATA)) if (t %in% GROUPS_DATA[[g]]) return(g)
-              NA_character_
-            })
-            mx_xg <- max(ts$lambda_base, na.rm=TRUE)
-            mx_ss <- max(ts$strength_score, na.rm=TRUE)
-
-            grp_names <- names(GROUPS_DATA)
-            # Split into 3 rows of 4
-            div(class="stats-group-grid",
-              do.call(tagList, lapply(grp_names, function(grp) {
-                rows <- ts[ts$grupo == grp, ]
-                rows <- rows[order(-rows$lambda_base), ]
-                div(class="stats-group-card",
-                  # Header con labels de columnas
-                  div(class="stats-group-card-header",
-                    tags$span(class="stats-grp-name", paste("Grupo", grp)),
-                    div(class="stats-col-labels",
-                      tags$span(class="stats-col-lbl", "FIFA"),
-                      tags$span(class="stats-col-lbl", "Gls/P"),
-                      tags$span(class="stats-col-lbl", "Ataque")
-                    )
-                  ),
-                  # Filas de equipos
-                  do.call(tagList, lapply(seq_len(nrow(rows)), function(i) {
-                    r      <- rows[i, ]
-                    xg     <- round(r$lambda_base, 2)
-                    ss     <- round(r$strength_score, 2)
-                    xg_pct <- xg / mx_xg
-                    ss_pct <- ss / mx_ss
-                    xg_col <- if (xg_pct > 0.75) "#27AE60"
-                               else if (xg_pct > 0.5) "#2E86AB"
-                               else if (xg_pct > 0.25) "#F39C12"
-                               else "#8BAEC8"
-                    is_host <- r$team %in% HOST_COUNTRIES
-
-                    div(class="stats-team-row",
-                      flag_img(as.character(r$team)),
-                      tags$span(
-                        class=paste0("stats-team-name", if(is_host) " host" else ""),
-                        as.character(r$team),
-                        if(is_host) tags$span(style="font-size:0.7em;margin-left:4px;color:#F39C12;", "*")
-                      ),
-                      # FIFA pts
-                      tags$span(class="stats-cell",
-                        style="color:#4A7A9B;font-size:0.75em;font-weight:600;",
-                        r$fifa_points),
-                      # Goles/partido
-                      tags$span(class="stats-cell",
-                        style=paste0("color:", xg_col, ";"),
-                        xg),
-                      # Barra poder ataque
-                      div(class="stats-bar-wrap",
-                        div(class="stats-bar-bg",
-                          div(class="stats-bar-fill",
-                            style=paste0(
-                              "width:", round(ss_pct * 100), "%;",
-                              "background:", xg_col, ";"
-                            )
-                          )
-                        )
-                      )
-                    )
-                  }))
-                )
-              }))
-            )
-          }
-        ))
+                              {
+                                # Precompute group + stats
+                                ts <- TEAM_STATS
+                                ts$grupo <- sapply(ts$team, function(t) {
+                                  for (g in names(GROUPS_DATA)) if (t %in% GROUPS_DATA[[g]]) return(g)
+                                  NA_character_
+                                })
+                                mx_xg <- max(ts$lambda_base, na.rm=TRUE)
+                                mx_ss <- max(ts$strength_score, na.rm=TRUE)
+                                
+                                grp_names <- names(GROUPS_DATA)
+                                # Split into 3 rows of 4
+                                div(class="stats-group-grid",
+                                    do.call(tagList, lapply(grp_names, function(grp) {
+                                      rows <- ts[ts$grupo == grp, ]
+                                      rows <- rows[order(-rows$lambda_base), ]
+                                      div(class="stats-group-card",
+                                          # Header con labels de columnas
+                                          div(class="stats-group-card-header",
+                                              tags$span(class="stats-grp-name", paste("Grupo", grp)),
+                                              div(class="stats-col-labels",
+                                                  tags$span(class="stats-col-lbl", "FIFA"),
+                                                  tags$span(class="stats-col-lbl", "Gls/P"),
+                                                  tags$span(class="stats-col-lbl", "Ataque")
+                                              )
+                                          ),
+                                          # Filas de equipos
+                                          do.call(tagList, lapply(seq_len(nrow(rows)), function(i) {
+                                            r      <- rows[i, ]
+                                            xg     <- round(r$lambda_base, 2)
+                                            ss     <- round(r$strength_score, 2)
+                                            xg_pct <- xg / mx_xg
+                                            ss_pct <- ss / mx_ss
+                                            xg_col <- if (xg_pct > 0.75) "#27AE60"
+                                            else if (xg_pct > 0.5) "#2E86AB"
+                                            else if (xg_pct > 0.25) "#F39C12"
+                                            else "#8BAEC8"
+                                            is_host <- r$team %in% HOST_COUNTRIES
+                                            
+                                            div(class="stats-team-row",
+                                                flag_img(as.character(r$team)),
+                                                tags$span(
+                                                  class=paste0("stats-team-name", if(is_host) " host" else ""),
+                                                  as.character(r$team),
+                                                  if(is_host) tags$span(style="font-size:0.7em;margin-left:4px;color:#F39C12;", "*")
+                                                ),
+                                                # FIFA pts
+                                                tags$span(class="stats-cell",
+                                                          style="color:#4A7A9B;font-size:0.75em;font-weight:600;",
+                                                          r$fifa_points),
+                                                # Goles/partido
+                                                tags$span(class="stats-cell",
+                                                          style=paste0("color:", xg_col, ";"),
+                                                          xg),
+                                                # Barra poder ataque
+                                                div(class="stats-bar-wrap",
+                                                    div(class="stats-bar-bg",
+                                                        div(class="stats-bar-fill",
+                                                            style=paste0(
+                                                              "width:", round(ss_pct * 100), "%;",
+                                                              "background:", xg_col, ";"
+                                                            )
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                          }))
+                                      )
+                                    }))
+                                )
+                              }
+              ))
       ), # fin variables
-
-
+      
+      
       # =========================================================
       # METODOLOGIA
       # =========================================================
       tabItem(tabName = "metodologia",
-        fluidRow(column(12, div(class="page-header-strip",
-          icon("cogs", style="margin-right:10px;font-size:1.2em;"),
-          "?Como funciona el simulador?"
-        ))),
-
-        fluidRow(column(12,
-          box(width=12, status="primary",
-            fluidRow(
-              column(6,
-                div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
-                  tags$h5(icon("ranking-star", style="color:#64CFF6;margin-right:8px;"),
-                          strong("Paso 1 - Ranking FIFA"), style="color:#AED6F1;margin-top:0;"),
-                  p("A cada seleccion se le asigna una", strong("fuerza de ataque"), "proporcional a su posicion en el Ranking FIFA oficial.",
-                    "Cuanto mas alto en el ranking, mas goles esperados por partido.",
-                    "Argentina, Francia y Espana arrancan como los mas fuertes.")
-                ),
-                div(style="background:rgba(30,132,73,0.07);border-left:4px solid #1E8449;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
-                  tags$h5(icon("dice", style="color:#1E8449;margin-right:8px;"),
-                          strong("Paso 2 - Simulacion de partidos"), style="color:#AED6F1;margin-top:0;"),
-                  p("Los goles de cada partido se generan con", strong("azar estadistico:"),
-                    "el mejor equipo tiene mas probabilidad de anotar, pero cualquier marcador es posible.",
-                    "Esto refleja la naturaleza impredecible del futbol.",
-                    "USA, Canada y Mexico tienen una pequena", strong("ventaja de local."))
-                ),
-                div(style="background:rgba(243,156,18,0.07);border-left:4px solid #F39C12;border-radius:8px;padding:16px 20px;",
-                  tags$h5(icon("sort-numeric-down", style="color:#F39C12;margin-right:8px;"),
-                          strong("Paso 3 - Clasificacion"), style="color:#AED6F1;margin-top:0;"),
-                  p("Se aplican las reglas oficiales FIFA:"),
-                  tags$ol(
-                    tags$li(strong("Puntos"), " acumulados en el grupo."),
-                    tags$li(strong("Diferencia de goles"), " en caso de empate."),
-                    tags$li(strong("Goles a favor"), " como segundo desempate."),
-                    tags$li(strong("Ranking FIFA"), " como desempate final.")
-                  )
-                )
-              ),
-              column(6,
-                div(style="background:rgba(142,68,173,0.07);border-left:4px solid #8E44AD;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
-                  tags$h5(icon("random", style="color:#8E44AD;margin-right:8px;"),
-                          strong("Paso 4 - Simulaciones multiples"), style="color:#AED6F1;margin-top:0;"),
-                  p("El simulador puede jugar el torneo completo", strong("hasta 1,000 veces,"),
-                    "cada vez con resultados distintos.",
-                    "El porcentaje que ves en la pestana Probabilidades indica",
-                    strong("cuantas veces clasifico ese equipo"), "en todas las simulaciones.",
-                    "Un 80% significa que clasifico en 8 de cada 10 torneos simulados.")
-                ),
-                div(style="background:rgba(192,57,43,0.07);border-left:4px solid #C0392B;border-radius:8px;padding:16px 20px;",
-                  tags$h5(icon("exclamation-triangle", style="color:#C0392B;margin-right:8px;"),
-                          strong("Limitaciones (lo que el simulador no sabe)"), style="color:#AED6F1;margin-top:0;"),
-                  tags$ul(
-                    tags$li("No considera", strong("lesiones, sanciones ni rotaciones"), "de plantilla."),
-                    tags$li("No incorpora la", strong("forma reciente"), "de los equipos."),
-                    tags$li("La ventaja de local es igual para los 3 paises sede - en realidad varia."),
-                    tags$li("El Ranking FIFA es una aproximacion del nivel real de cada seleccion.")
-                  )
-                )
-              )
-            )
-          )
-        ))
+              fluidRow(column(12, div(class="page-header-strip",
+                                      icon("cogs", style="margin-right:10px;font-size:1.2em;"),
+                                      "?Como funciona el simulador?"
+              ))),
+              
+              fluidRow(column(12,
+                              box(width=12, status="primary",
+                                  fluidRow(
+                                    column(6,
+                                           div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
+                                               tags$h5(icon("ranking-star", style="color:#64CFF6;margin-right:8px;"),
+                                                       strong("Paso 1 - Ranking FIFA"), style="color:#AED6F1;margin-top:0;"),
+                                               p("A cada seleccion se le asigna una", strong("fuerza de ataque"), "proporcional a su posicion en el Ranking FIFA oficial.",
+                                                 "Cuanto mas alto en el ranking, mas goles esperados por partido.",
+                                                 "Argentina, Francia y Espana arrancan como los mas fuertes.")
+                                           ),
+                                           div(style="background:rgba(30,132,73,0.07);border-left:4px solid #1E8449;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
+                                               tags$h5(icon("dice", style="color:#1E8449;margin-right:8px;"),
+                                                       strong("Paso 2 - Simulacion de partidos"), style="color:#AED6F1;margin-top:0;"),
+                                               p("Los goles de cada partido se generan con", strong("azar estadistico:"),
+                                                 "el mejor equipo tiene mas probabilidad de anotar, pero cualquier marcador es posible.",
+                                                 "Esto refleja la naturaleza impredecible del futbol.",
+                                                 "USA, Canada y Mexico tienen una pequena", strong("ventaja de local."))
+                                           ),
+                                           div(style="background:rgba(243,156,18,0.07);border-left:4px solid #F39C12;border-radius:8px;padding:16px 20px;",
+                                               tags$h5(icon("sort-numeric-down", style="color:#F39C12;margin-right:8px;"),
+                                                       strong("Paso 3 - Clasificacion"), style="color:#AED6F1;margin-top:0;"),
+                                               p("Se aplican las reglas oficiales FIFA:"),
+                                               tags$ol(
+                                                 tags$li(strong("Puntos"), " acumulados en el grupo."),
+                                                 tags$li(strong("Diferencia de goles"), " en caso de empate."),
+                                                 tags$li(strong("Goles a favor"), " como segundo desempate."),
+                                                 tags$li(strong("Ranking FIFA"), " como desempate final.")
+                                               )
+                                           )
+                                    ),
+                                    column(6,
+                                           div(style="background:rgba(142,68,173,0.07);border-left:4px solid #8E44AD;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
+                                               tags$h5(icon("random", style="color:#8E44AD;margin-right:8px;"),
+                                                       strong("Paso 4 - Simulaciones multiples"), style="color:#AED6F1;margin-top:0;"),
+                                               p("El simulador puede jugar el torneo completo", strong("hasta 1,000 veces,"),
+                                                 "cada vez con resultados distintos.",
+                                                 "El porcentaje que ves en la pestana Probabilidades indica",
+                                                 strong("cuantas veces clasifico ese equipo"), "en todas las simulaciones.",
+                                                 "Un 80% significa que clasifico en 8 de cada 10 torneos simulados.")
+                                           ),
+                                           div(style="background:rgba(192,57,43,0.07);border-left:4px solid #C0392B;border-radius:8px;padding:16px 20px;",
+                                               tags$h5(icon("exclamation-triangle", style="color:#C0392B;margin-right:8px;"),
+                                                       strong("Limitaciones (lo que el simulador no sabe)"), style="color:#AED6F1;margin-top:0;"),
+                                               tags$ul(
+                                                 tags$li("No considera", strong("lesiones, sanciones ni rotaciones"), "de plantilla."),
+                                                 tags$li("No incorpora la", strong("forma reciente"), "de los equipos."),
+                                                 tags$li("La ventaja de local es igual para los 3 paises sede - en realidad varia."),
+                                                 tags$li("El Ranking FIFA es una aproximacion del nivel real de cada seleccion.")
+                                               )
+                                           )
+                                    )
+                                  )
+                              )
+              ))
       ) # fin metodologia
-
+      
     ) # fin tabItems
+    ,
+    # ============================================================
+    # WIDGET FLOTANTE DE CHAT (Asistente Mundial 2026)
+    # ============================================================
+    tags$div(id = "wc-chat",
+             tags$style(HTML("
+        #wc-chat * { box-sizing: border-box; }
+        #wc-fab {
+          position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+          width: 60px; height: 60px; border-radius: 50%;
+          background: linear-gradient(135deg,#1B4F72,#2E86AB);
+          box-shadow: 0 6px 22px rgba(46,134,171,0.5);
+          display: flex; align-items: center; justify-content: center;
+          cursor: pointer; color: #fff; font-size: 1.5em;
+          transition: transform .15s ease, opacity .15s ease;
+        }
+        #wc-fab:hover { transform: scale(1.08); }
+        #wc-fab.hidden { opacity: 0; pointer-events: none; transform: scale(0.6); }
+        #wc-panel {
+          position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+          width: 370px; max-width: calc(100vw - 32px);
+          height: 540px; max-height: calc(100vh - 48px);
+          background: #0A1628; border: 1.5px solid rgba(100,207,246,0.35);
+          border-radius: 16px; box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+          display: none; flex-direction: column; overflow: hidden;
+        }
+        #wc-panel.open { display: flex; }
+        .wc-header {
+          background: linear-gradient(135deg,#0A1628,#13314f);
+          padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
+          border-bottom: 1px solid rgba(100,207,246,0.2);
+        }
+        .wc-title { color: #64CFF6; font-weight: 800; font-size: 0.98em;
+          display: flex; align-items: center; gap: 8px; }
+        .wc-title .wc-dot { width: 8px; height: 8px; border-radius: 50%;
+          background: #2ECC71; box-shadow: 0 0 8px #2ECC71; }
+        .wc-close { color: #5C8AB0; cursor: pointer; font-size: 1.3em;
+          line-height: 1; padding: 2px 9px; border-radius: 8px; }
+        .wc-close:hover { color: #E8F4FD; background: rgba(255,255,255,0.06); }
+        #wc-body { flex: 1; overflow-y: auto; padding: 16px;
+          display: flex; flex-direction: column; gap: 10px; }
+        #wc-body::-webkit-scrollbar { width: 7px; }
+        #wc-body::-webkit-scrollbar-thumb { background: rgba(100,207,246,0.25); border-radius: 6px; }
+        .chat-msg { display: flex; }
+        .chat-user { justify-content: flex-end; }
+        .chat-bot { justify-content: flex-start; }
+        .chat-bubble { max-width: 82%; padding: 10px 13px; border-radius: 13px;
+          font-size: 0.9em; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+        .chat-user .chat-bubble { background: linear-gradient(135deg,#1B4F72,#2E86AB);
+          color: #fff; border-bottom-right-radius: 4px; }
+        .chat-bot .chat-bubble { background: rgba(46,134,171,0.12); color: #E8F4FD;
+          border: 1px solid rgba(46,134,171,0.25); border-bottom-left-radius: 4px; }
+        .wc-input-row { padding: 12px; border-top: 1px solid rgba(100,207,246,0.18);
+          display: flex; gap: 8px; align-items: flex-end; background: #0A1628; }
+        .wc-input-row .form-group { margin: 0; flex: 1; }
+        #chat_input { background: #13243a !important; color: #E8F4FD !important;
+          border: 1px solid rgba(100,207,246,0.3) !important; border-radius: 10px !important;
+          resize: none !important; font-size: 0.9em !important; min-height: 42px !important; max-height: 120px; }
+        #chat_input::placeholder { color: #5C8AB0 !important; }
+        #chat_send_btn { background: linear-gradient(135deg,#1B4F72,#2E86AB) !important;
+          color: #fff !important; border: none !important; border-radius: 10px !important;
+          height: 42px; width: 46px; display: flex; align-items: center;
+          justify-content: center; padding: 0 !important; }
+        #chat_send_btn:hover { filter: brightness(1.12); }
+        @media (max-width: 480px) {
+          #wc-panel { width: calc(100vw - 24px); height: calc(100vh - 90px); bottom: 12px; right: 12px; }
+        }
+      ")),
+             tags$div(id = "wc-panel",
+                      tags$div(class = "wc-header",
+                               tags$div(class = "wc-title",
+                                        tags$span(class = "wc-dot"), icon("robot"),
+                                        tags$span("Asistente Mundial 2026")),
+                               tags$div(id = "wc-close", class = "wc-close", HTML("&times;"))
+                      ),
+                      tags$div(id = "wc-body", uiOutput("chat_messages")),
+                      tags$div(class = "wc-input-row",
+                               textAreaInput("chat_input", label = NULL,
+                                             placeholder = "Pregunta sobre el Mundial...", width = "100%", rows = 1),
+                               actionButton("chat_send_btn", label = icon("paper-plane"))
+                      )
+             ),
+             tags$div(id = "wc-fab", icon("comments")),
+             tags$script(HTML("
+        (function(){
+          function scrollChat(){ var b=document.getElementById('wc-body');
+            if(b){ setTimeout(function(){ b.scrollTop=b.scrollHeight; }, 60); } }
+          function openPanel(){ var p=document.getElementById('wc-panel'),
+              f=document.getElementById('wc-fab');
+            if(p) p.classList.add('open'); if(f) f.classList.add('hidden');
+            scrollChat(); var ta=document.getElementById('chat_input');
+            if(ta) setTimeout(function(){ ta.focus(); }, 60); }
+          function closePanel(){ var p=document.getElementById('wc-panel'),
+              f=document.getElementById('wc-fab');
+            if(p) p.classList.remove('open'); if(f) f.classList.remove('hidden'); }
+          document.addEventListener('click', function(e){
+            if(e.target.closest && e.target.closest('#wc-fab')) openPanel();
+            if(e.target.closest && e.target.closest('#wc-close')) closePanel();
+          });
+          document.addEventListener('keydown', function(e){
+            if(e.target && e.target.id==='chat_input' && e.key==='Enter' && !e.shiftKey){
+              e.preventDefault();
+              var btn=document.getElementById('chat_send_btn'); if(btn) btn.click();
+            }
+          });
+          if(window.Shiny){ Shiny.addCustomMessageHandler('scrollChat', function(x){ scrollChat(); }); }
+          var target=document.getElementById('wc-body');
+          if(target && window.MutationObserver){
+            new MutationObserver(scrollChat).observe(target, {childList:true, subtree:true});
+          }
+        })();
+      "))
+    )
   ) # fin dashboardBody
 ) # fin dashboardPage
 
@@ -2105,14 +2311,98 @@ ui <- dashboardPage(
 # SERVER
 # ============================================================
 server <- function(input, output, session) {
-
+  
+  # ============================================================
+  # CHATBOT GEMINI - logica de servidor
+  # ============================================================
+  chat_history <- reactiveVal(list(
+    list(role = "model",
+         text = paste0("Hola! Soy tu asistente del Mundial 2026. Preguntame por los grupos, ",
+                       "el ranking, quien clasifica o quien es favorito. Corre las simulaciones ",
+                       "para que pueda darte numeros exactos."))
+  ))
+  
+  # Construye el contexto en vivo leyendo lo que el usuario ya calculo
+  build_chat_context <- function() {
+    L <- c("=== DATOS DEL TORNEO (FIFA World Cup 2026) ===", "", "GRUPOS:")
+    for (g in names(GROUPS_DATA))
+      L <- c(L, paste0("Grupo ", g, ": ", paste(GROUPS_DATA[[g]], collapse = ", ")))
+    
+    ts <- TEAM_STATS[order(-TEAM_STATS$fifa_points), ]
+    L <- c(L, "", "RANKING Y FUERZA (equipo | confederacion | pts FIFA | fuerza/14 | sede):")
+    for (i in seq_len(nrow(ts)))
+      L <- c(L, sprintf("%s | %s | %d | %.1f | %s",
+                        ts$team[i], ts$confederation[i], as.integer(ts$fifa_points[i]),
+                        ts$strength_score[i], ifelse(isTRUE(ts$is_host[i]), "SEDE", "-")))
+    
+    sr <- sim_result()
+    if (!is.null(sr) && !is.null(sr$qualified) && nrow(sr$qualified) > 0) {
+      q <- sr$qualified
+      L <- c(L, "", "=== CLASIFICADOS DE LA ULTIMA SIMULACION (fase de grupos) ===")
+      for (i in seq_len(nrow(q)))
+        L <- c(L, sprintf("%s - grupo %s, puesto %s, %d pts, DG %d",
+                          q$team[i], q$group[i], q$pos[i], q$PTS[i], q$DG[i]))
+    } else {
+      L <- c(L, "", "NOTA: el usuario AUN NO ha corrido la simulacion de fase de grupos (pestana Simulacion).")
+    }
+    
+    mc <- mc_result()
+    if (!is.null(mc) && nrow(mc) > 0) {
+      L <- c(L, "", "=== PROBABILIDAD DE CLASIFICAR A DIECISEISAVOS (Monte Carlo) ===")
+      for (i in seq_len(nrow(mc)))
+        L <- c(L, sprintf("%s: %.1f%%", mc$team[i], 100 * mc$prob[i]))
+    } else {
+      L <- c(L, "", "NOTA: el usuario AUN NO ha corrido las probabilidades Monte Carlo (pestana Probabilidades).")
+    }
+    
+    cr <- champ_result()
+    if (!is.null(cr) && nrow(cr) > 0) {
+      L <- c(L, "", "=== PROBABILIDAD DE SER CAMPEON (top 20) ===")
+      topn <- head(cr, 20)
+      for (i in seq_len(nrow(topn)))
+        L <- c(L, sprintf("%s: %.1f%%", topn$team[i], 100 * topn$prob[i]))
+    }
+    cb <- champ_bracket()
+    if (!is.null(cb) && !is.null(cb$champion))
+      L <- c(L, "", paste0("Campeon de la ultima simulacion de bracket: ", cb$champion))
+    
+    paste(L, collapse = "\n")
+  }
+  
+  output$chat_messages <- renderUI({
+    msgs <- chat_history()
+    lapply(msgs, function(m) {
+      cls <- if (identical(m$role, "user")) "chat-msg chat-user" else "chat-msg chat-bot"
+      tags$div(class = cls, tags$div(class = "chat-bubble", m$text))
+    })
+  })
+  # El panel arranca oculto (display:none); evitamos que Shiny suspenda el output
+  outputOptions(output, "chat_messages", suspendWhenHidden = FALSE)
+  
+  observeEvent(input$chat_send_btn, {
+    txt <- trimws(input$chat_input %||% "")
+    if (identical(txt, "")) return(NULL)
+    
+    hist <- c(chat_history(), list(list(role = "user", text = txt)))
+    chat_history(hist)
+    updateTextAreaInput(session, "chat_input", value = "")
+    session$sendCustomMessage("scrollChat", TRUE)
+    
+    system_text <- paste0(CHAT_SYSTEM_BASE, "\n\n", build_chat_context())
+    reply <- call_gemini(system_text, hist)
+    
+    chat_history(c(chat_history(), list(list(role = "model", text = reply))))
+    session$sendCustomMessage("scrollChat", TRUE)
+  })
+  
+  
   # ---- Reactive: resultado de simulacion unica ----
   sim_result <- reactiveVal(NULL)
-
+  
   observeEvent(input$btn_seed_random, {
     updateNumericInput(session, "sim_seed", value = sample(1:99999, 1))
   })
-
+  
   observeEvent(input$btn_simular, {
     withProgress(message = "Simulando fase de grupos...", value = 0, {
       setProgress(0.3, detail = "Ejecutando partidos jornada 1-3")
@@ -2127,11 +2417,11 @@ server <- function(input, output, session) {
       sim_result(res)
     })
   })
-
+  
   # ---- Banner de "simula primero" en clasificados ----
   output$clasificados_banner_ui <- renderUI({
     if (!is.null(sim_result())) return(NULL)  # ya hay simulacion, no mostrar nada
-
+    
     tags$div(
       style = paste0(
         "margin:0 0 20px;padding:20px 24px;",
@@ -2150,33 +2440,33 @@ server <- function(input, output, session) {
       ),
       # Texto
       tags$div(style="flex:1;",
-        tags$div(style="color:#F39C12;font-weight:800;font-size:1.05em;margin-bottom:4px;",
-          "Primero debes simular el torneo"
-        ),
-        tags$div(style="color:#8BAEC8;font-size:0.88em;line-height:1.5;",
-          "Esta pestana muestra los resultados de la fase de grupos.",
-          tags$br(),
-          "Ve a la pestana ", tags$strong(style="color:#E8F4FD;", "Simulacion"),
-          ", presiona ", tags$strong(style="color:#64CFF6;", "Simular torneo"),
-          " y luego vuelve aqui para ver quienes clasificaron."
-        )
+               tags$div(style="color:#F39C12;font-weight:800;font-size:1.05em;margin-bottom:4px;",
+                        "Primero debes simular el torneo"
+               ),
+               tags$div(style="color:#8BAEC8;font-size:0.88em;line-height:1.5;",
+                        "Esta pestana muestra los resultados de la fase de grupos.",
+                        tags$br(),
+                        "Ve a la pestana ", tags$strong(style="color:#E8F4FD;", "Simulacion"),
+                        ", presiona ", tags$strong(style="color:#64CFF6;", "Simular torneo"),
+                        " y luego vuelve aqui para ver quienes clasificaron."
+               )
       ),
       # Flecha indicadora
       tags$div(
         style = "flex-shrink:0;",
         actionButton("go_to_sim", 
-          tagList(icon("play-circle"), tags$span(style="margin-left:6px;", "Ir a Simulacion")),
-          style = paste0(
-            "background:linear-gradient(135deg,#1B4F72,#2E86AB)!important;",
-            "color:white!important;border:none!important;border-radius:10px!important;",
-            "padding:10px 18px!important;font-weight:700!important;",
-            "box-shadow:0 4px 16px rgba(46,134,171,0.4)!important;"
-          )
+                     tagList(icon("play-circle"), tags$span(style="margin-left:6px;", "Ir a Simulacion")),
+                     style = paste0(
+                       "background:linear-gradient(135deg,#1B4F72,#2E86AB)!important;",
+                       "color:white!important;border:none!important;border-radius:10px!important;",
+                       "padding:10px 18px!important;font-weight:700!important;",
+                       "box-shadow:0 4px 16px rgba(46,134,171,0.4)!important;"
+                     )
         )
       )
     )
   })
-
+  
   # Navegar a simulacion al hacer click en el boton del banner
   observeEvent(input$go_to_sim, {
     updateTabItems(session, "sidebar_tabs", selected = "simulacion")
@@ -2187,7 +2477,7 @@ server <- function(input, output, session) {
   # ============================================================
   champ_result  <- reactiveVal(NULL)
   champ_bracket <- reactiveVal(NULL)
-
+  
   # Helper interno: tarjeta de partido KO
   ko_card <- function(m, is_final=FALSE) {
     if (is.null(m)) return(NULL)
@@ -2199,26 +2489,26 @@ server <- function(input, output, session) {
     wa <- (wn == ta)
     cls <- if (is_final) "ko-match final-match" else "ko-match"
     div(class=cls,
-      div(class=paste0("ko-team ", if(wa) "ko-w" else "ko-l"),
-        flag_img(ta),
-        tags$span(class=paste0("ko-tname ", if(wa) "ko-w" else "ko-l"), ta),
-        tags$span(class=paste0("ko-score ", if(wa) "ko-w" else "ko-l"), ga)
-      ),
-      div(class=paste0("ko-team ", if(!wa) "ko-w" else "ko-l"),
-        flag_img(tb),
-        tags$span(class=paste0("ko-tname ", if(!wa) "ko-w" else "ko-l"), tb),
-        tags$span(class=paste0("ko-score ", if(!wa) "ko-w" else "ko-l"), gb)
-      )
+        div(class=paste0("ko-team ", if(wa) "ko-w" else "ko-l"),
+            flag_img(ta),
+            tags$span(class=paste0("ko-tname ", if(wa) "ko-w" else "ko-l"), ta),
+            tags$span(class=paste0("ko-score ", if(wa) "ko-w" else "ko-l"), ga)
+        ),
+        div(class=paste0("ko-team ", if(!wa) "ko-w" else "ko-l"),
+            flag_img(tb),
+            tags$span(class=paste0("ko-tname ", if(!wa) "ko-w" else "ko-l"), tb),
+            tags$span(class=paste0("ko-score ", if(!wa) "ko-w" else "ko-l"), gb)
+        )
     )
   }
-
+  
   observeEvent(input$btn_campeon, {
     withProgress(message="Simulando el Mundial completo...", value=0, {
       n   <- input$champ_nsims
       all <- unlist(GROUPS_DATA)
       cnt <- setNames(integer(length(all)), all)
       last_brk <- NULL
-
+      
       for (s in seq_len(n)) {
         full_sim <- tryCatch(run_group_stage(), error=function(e) NULL)
         if (is.null(full_sim)) next
@@ -2233,16 +2523,16 @@ server <- function(input, output, session) {
         if (!is.na(idx)) cnt[idx] <- cnt[idx] + 1L
         last_brk <- brk
         if (s %% 50 == 0) setProgress(0.1 + 0.85*(s/n),
-          detail=paste0(s, "/", n, " simulaciones"))
+                                      detail=paste0(s, "/", n, " simulaciones"))
       }
-
+      
       setProgress(1.0, detail="Completado")
-
+      
       if (is.null(last_brk)) {
         showNotification("No se pudo completar ninguna simulacion. Revisa los datos.", type="error")
         return()
       }
-
+      
       prob_df <- data.frame(
         team = names(cnt),
         prob = as.numeric(cnt) / n,
@@ -2250,29 +2540,29 @@ server <- function(input, output, session) {
       )
       prob_df <- prob_df[order(-prob_df$prob), ]
       prob_df <- prob_df[prob_df$prob > 0, ]
-
+      
       champ_result(prob_df)
       champ_bracket(last_brk)
     })
   })
-
+  
   output$campeon_ui <- renderUI({
     # -- Estado vacio --
     if (is.null(champ_result())) {
       return(div(class="champ-empty",
-        tags$img(src="trophy.png", height="72",
-          style="display:block;margin:0 auto 18px;filter:drop-shadow(0 0 10px rgba(245,208,96,0.4));opacity:0.75;"),
-        tags$div(style="color:#F5D060;font-size:1.05em;font-weight:700;margin-bottom:8px;",
-          "Simula el Campeon del Mundial"),
-        tags$div(style="color:#4A7A9B;font-size:0.88em;",
-          "Elige el numero de simulaciones y presiona",
-          tags$strong(style="color:#64CFF6;", " Simular Campeon"), ".")
+                 tags$img(src="trophy.png", height="72",
+                          style="display:block;margin:0 auto 18px;filter:drop-shadow(0 0 10px rgba(245,208,96,0.4));opacity:0.75;"),
+                 tags$div(style="color:#F5D060;font-size:1.05em;font-weight:700;margin-bottom:8px;",
+                          "Simula el Campeon del Mundial"),
+                 tags$div(style="color:#4A7A9B;font-size:0.88em;",
+                          "Elige el numero de simulaciones y presiona",
+                          tags$strong(style="color:#64CFF6;", " Simular Campeon"), ".")
       ))
     }
-
+    
     df  <- champ_result()
     brk <- champ_bracket()
-
+    
     # Safe bracket accessors
     get_r <- function(lst, i) {
       if (is.null(lst) || i > length(lst)) {
@@ -2281,66 +2571,66 @@ server <- function(input, output, session) {
     }
     get_sf <- function(i) get_r(brk$sf, i)
     get_fin <- function() get_r(brk$final, 1)
-
+    
     champ     <- df$team[1]
     champ_pct <- round(df$prob[1]*100, 1)
-
+    
     tagList(
       # -- CAMPEON HERO --
       fluidRow(column(12,
-        div(class="champ-hero", style="margin-bottom:18px;",
-          tags$div(style="font-size:0.68em;font-weight:800;letter-spacing:3px;color:#8B6914;text-transform:uppercase;margin-bottom:10px;",
-            "FIFA World Cup 2026 - Campeon del Mundo"),
-          div(style="display:flex;align-items:center;justify-content:center;gap:20px;flex-wrap:wrap;",
-            tags$img(src="trophy.png", height="76",
-              class="trophy-glow",
-              style="flex-shrink:0;"),
-            div(style="text-align:left;",
-              div(style="display:flex;align-items:center;gap:12px;",
-                tags$div(style="transform:scale(2);", flag_img(champ)),
-                tags$div(class="champ-name", champ)
-              ),
-              tags$div(style="color:#8BAEC8;font-size:0.88em;margin-top:6px;",
-                paste0("Campeon en ", champ_pct, "% de ", input$champ_nsims, " simulaciones")),
-              if (nrow(df) >= 2) tags$div(style="color:#4A7A9B;font-size:0.78em;margin-top:3px;",
-                paste0("2 lugar: ", df$team[2], " (", round(df$prob[2]*100,1), "%)  |  ",
-                  if(nrow(df)>=3) paste0("3 lugar: ", df$team[3], " (", round(df$prob[3]*100,1), "%)") else ""))
-            )
-          )
-        )
+                      div(class="champ-hero", style="margin-bottom:18px;",
+                          tags$div(style="font-size:0.68em;font-weight:800;letter-spacing:3px;color:#8B6914;text-transform:uppercase;margin-bottom:10px;",
+                                   "FIFA World Cup 2026 - Campeon del Mundo"),
+                          div(style="display:flex;align-items:center;justify-content:center;gap:20px;flex-wrap:wrap;",
+                              tags$img(src="trophy.png", height="76",
+                                       class="trophy-glow",
+                                       style="flex-shrink:0;"),
+                              div(style="text-align:left;",
+                                  div(style="display:flex;align-items:center;gap:12px;",
+                                      tags$div(style="transform:scale(2);", flag_img(champ)),
+                                      tags$div(class="champ-name", champ)
+                                  ),
+                                  tags$div(style="color:#8BAEC8;font-size:0.88em;margin-top:6px;",
+                                           paste0("Campeon en ", champ_pct, "% de ", input$champ_nsims, " simulaciones")),
+                                  if (nrow(df) >= 2) tags$div(style="color:#4A7A9B;font-size:0.78em;margin-top:3px;",
+                                                              paste0("2 lugar: ", df$team[2], " (", round(df$prob[2]*100,1), "%)  |  ",
+                                                                     if(nrow(df)>=3) paste0("3 lugar: ", df$team[3], " (", round(df$prob[3]*100,1), "%)") else ""))
+                              )
+                          )
+                      )
       )),
-
+      
       # -- BRACKET + PROBABILIDADES --
       fluidRow(column(12,
-        div(style=paste0(
-          "background:rgba(243,156,18,0.07);border:1px solid rgba(243,156,18,0.25);",
-          "border-radius:10px;padding:12px 18px;margin-bottom:14px;",
-          "display:flex;align-items:center;gap:14px;"
-        ),
-          icon("info-circle", style="color:#F39C12;font-size:1.1em;flex-shrink:0;"),
-          div(
-            tags$span(style="color:#F39C12;font-weight:700;font-size:0.9em;",
-              "Nota: "),
-            tags$span(style="color:#8BAEC8;font-size:0.88em;",
-              "El bracket mostrado corresponde a la ",
-              strong(style="color:#E8F4FD;", "ultima simulacion"),
-              " de ", input$champ_nsims, " torneos jugados.",
-              " El campeon puede variar en cada ejecucion.",
-              " El ranking de la derecha muestra ",
-              strong(style="color:#64CFF6;", "la probabilidad acumulada"),
-              " de ganar el mundial en todas las simulaciones.")
-          )
-        )
+                      div(style=paste0(
+                        "background:rgba(243,156,18,0.07);border:1px solid rgba(243,156,18,0.25);",
+                        "border-radius:10px;padding:12px 18px;margin-bottom:14px;",
+                        "display:flex;align-items:center;gap:14px;"
+                      ),
+                      icon("info-circle", style="color:#F39C12;font-size:1.1em;flex-shrink:0;"),
+                      div(
+                        tags$span(style="color:#F39C12;font-weight:700;font-size:0.9em;",
+                                  "Nota: "),
+                        tags$span(style="color:#8BAEC8;font-size:0.88em;",
+                                  "El bracket mostrado corresponde a la ",
+                                  strong(style="color:#E8F4FD;", "ultima simulacion"),
+                                  " de ", input$champ_nsims, " torneos jugados.",
+                                  " El campeon puede variar en cada ejecucion.",
+                                  " El ranking de la derecha muestra ",
+                                  strong(style="color:#64CFF6;", "la probabilidad acumulada"),
+                                  " de ganar el mundial en todas las simulaciones.")
+                      )
+                      )
       )),
       fluidRow(
         # Bracket mundialista
         column(9,
-          div(style=paste0(
-            "background:linear-gradient(160deg,#061120,#0D1F3C,#061120);",
-            "border:1px solid rgba(245,208,96,0.2);border-radius:16px;",
-            "padding:20px;overflow-x:auto;"
-          ),
-          tags$style(HTML("
+               div(style=paste0(
+                 "background:linear-gradient(160deg,#061120,#0D1F3C,#061120);",
+                 "border:1px solid rgba(245,208,96,0.2);border-radius:16px;",
+                 "padding:20px;overflow-x:auto;"
+               ),
+               tags$style(HTML("
             .wc-bracket {
               display:flex;align-items:stretch;gap:0;min-width:860px;
             }
@@ -2379,234 +2669,234 @@ server <- function(input, output, session) {
             .wc-sc.wc-l { color:#4A7A9B; }
             .wc-conn { width:14px;flex-shrink:0;display:flex;flex-direction:column;justify-content:space-around;padding:0; }
           ")),
-
-          tags$div(class="wc-bracket",
-
-            # ---- LEFT SIDE: R32 = 16avos ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "16avos"),
-              tags$div(class="wc-matches",
-                lapply(1:8, function(i) {
-                  m <- get_r(brk$r32, i)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                })
-              )
-            ),
-
-            # ---- LEFT R16 = Octavos ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "Octavos"),
-              tags$div(class="wc-matches",
-                lapply(1:4, function(i) {
-                  m  <- get_r(brk$r16, i)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                })
-              )
-            ),
-
-            # ---- LEFT QF = Cuartos ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "Cuartos"),
-              tags$div(class="wc-matches",
-                lapply(1:2, function(i) {
-                  m  <- get_r(brk$qf, i)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                })
-              )
-            ),
-
-            # ---- LEFT SF = Semis ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "Semifinal"),
-              tags$div(class="wc-matches",
-                {
-                  m  <- get_sf(1)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                }
-              )
-            ),
-
-            # ---- CENTER: FINAL + TROPHY ----
-            tags$div(style="flex:0 0 140px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 6px;",
-              tags$div(style="color:#F5D060;font-size:0.62em;font-weight:800;text-transform:uppercase;letter-spacing:2px;text-align:center;margin-bottom:12px;border-bottom:1px solid rgba(245,208,96,0.2);padding-bottom:6px;width:100%;",
-                "GRAN FINAL"),
-              {
-                m  <- get_fin()
-                ta <- as.character(m$a); tb <- as.character(m$b)
-                wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                tagList(
-                  tags$img(src="trophy.png", height="50",
-                    class="trophy-glow",
-                    style="display:block;margin:0 auto 10px;"),
-                  div(class="wc-match wc-final", style="width:100%;",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  ),
-                  tags$div(style="text-align:center;margin-top:8px;font-size:0.7em;font-weight:800;color:#F5D060;",
-                    paste("Campeon:", as.character(m$winner)))
-                )
-              }
-            ),
-
-            # ---- RIGHT SF = Semis ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "Semifinal"),
-              tags$div(class="wc-matches",
-                {
-                  m  <- get_sf(2)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                }
-              )
-            ),
-
-            # ---- RIGHT QF = Cuartos ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "Cuartos"),
-              tags$div(class="wc-matches",
-                lapply(3:4, function(i) {
-                  m  <- get_r(brk$qf, i)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                })
-              )
-            ),
-
-            # ---- RIGHT R16 = Octavos ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "Octavos"),
-              tags$div(class="wc-matches",
-                lapply(5:8, function(i) {
-                  m  <- get_r(brk$r16, i)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                })
-              )
-            ),
-
-            # ---- RIGHT R32 = 16avos ----
-            tags$div(class="wc-col",
-              tags$div(class="wc-col-label", "16avos"),
-              tags$div(class="wc-matches",
-                lapply(9:16, function(i) {
-                  m  <- get_r(brk$r32, i)
-                  ta <- as.character(m$a); tb <- as.character(m$b)
-                  wa <- !is.null(m$winner) && as.character(m$winner)==ta
-                  div(class="wc-match",
-                    div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                      flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
-                      tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
-                    div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                      flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
-                      tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
-                  )
-                })
-              )
-            )
-
-          ) # fin wc-bracket
-          ) # fin div background
+               
+               tags$div(class="wc-bracket",
+                        
+                        # ---- LEFT SIDE: R32 = 16avos ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "16avos"),
+                                 tags$div(class="wc-matches",
+                                          lapply(1:8, function(i) {
+                                            m <- get_r(brk$r32, i)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          })
+                                 )
+                        ),
+                        
+                        # ---- LEFT R16 = Octavos ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "Octavos"),
+                                 tags$div(class="wc-matches",
+                                          lapply(1:4, function(i) {
+                                            m  <- get_r(brk$r16, i)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          })
+                                 )
+                        ),
+                        
+                        # ---- LEFT QF = Cuartos ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "Cuartos"),
+                                 tags$div(class="wc-matches",
+                                          lapply(1:2, function(i) {
+                                            m  <- get_r(brk$qf, i)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          })
+                                 )
+                        ),
+                        
+                        # ---- LEFT SF = Semis ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "Semifinal"),
+                                 tags$div(class="wc-matches",
+                                          {
+                                            m  <- get_sf(1)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          }
+                                 )
+                        ),
+                        
+                        # ---- CENTER: FINAL + TROPHY ----
+                        tags$div(style="flex:0 0 140px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 6px;",
+                                 tags$div(style="color:#F5D060;font-size:0.62em;font-weight:800;text-transform:uppercase;letter-spacing:2px;text-align:center;margin-bottom:12px;border-bottom:1px solid rgba(245,208,96,0.2);padding-bottom:6px;width:100%;",
+                                          "GRAN FINAL"),
+                                 {
+                                   m  <- get_fin()
+                                   ta <- as.character(m$a); tb <- as.character(m$b)
+                                   wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                   tagList(
+                                     tags$img(src="trophy.png", height="50",
+                                              class="trophy-glow",
+                                              style="display:block;margin:0 auto 10px;"),
+                                     div(class="wc-match wc-final", style="width:100%;",
+                                         div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                             flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                             tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                         div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                             flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                             tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                     ),
+                                     tags$div(style="text-align:center;margin-top:8px;font-size:0.7em;font-weight:800;color:#F5D060;",
+                                              paste("Campeon:", as.character(m$winner)))
+                                   )
+                                 }
+                        ),
+                        
+                        # ---- RIGHT SF = Semis ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "Semifinal"),
+                                 tags$div(class="wc-matches",
+                                          {
+                                            m  <- get_sf(2)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          }
+                                 )
+                        ),
+                        
+                        # ---- RIGHT QF = Cuartos ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "Cuartos"),
+                                 tags$div(class="wc-matches",
+                                          lapply(3:4, function(i) {
+                                            m  <- get_r(brk$qf, i)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          })
+                                 )
+                        ),
+                        
+                        # ---- RIGHT R16 = Octavos ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "Octavos"),
+                                 tags$div(class="wc-matches",
+                                          lapply(5:8, function(i) {
+                                            m  <- get_r(brk$r16, i)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          })
+                                 )
+                        ),
+                        
+                        # ---- RIGHT R32 = 16avos ----
+                        tags$div(class="wc-col",
+                                 tags$div(class="wc-col-label", "16avos"),
+                                 tags$div(class="wc-matches",
+                                          lapply(9:16, function(i) {
+                                            m  <- get_r(brk$r32, i)
+                                            ta <- as.character(m$a); tb <- as.character(m$b)
+                                            wa <- !is.null(m$winner) && as.character(m$winner)==ta
+                                            div(class="wc-match",
+                                                div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
+                                                div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
+                                            )
+                                          })
+                                 )
+                        )
+                        
+               ) # fin wc-bracket
+               ) # fin div background
         ), # fin column(9)
-
+        
         # Probabilidades de campeonato
         column(3,
-          div(style="background:#08131F;border:1px solid rgba(245,208,96,0.12);border-radius:14px;padding:16px;height:100%;",
-            tags$div(style="color:#F5D060;font-size:0.72em;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;",
-              icon("crown", style="margin-right:6px;"),
-              "Frecuencia de Campeonato"),
-            tags$div(style="color:#4A7A9B;font-size:0.72em;margin-bottom:12px;",
-              paste0("Veces campeon / ", input$champ_nsims, " simulaciones")),
-            div(style="max-height:600px;overflow-y:auto;",
-              do.call(tagList, lapply(seq_len(nrow(df)), function(i) {
-                r    <- df[i,]
-                pct  <- round(r$prob*100, 1)
-                wins <- round(r$prob * input$champ_nsims)
-                bw   <- round(r$prob / df$prob[1] * 100)
-                col  <- if(i==1) "#F5D060" else if(i<=3) "#C8960C" else if(i<=8) "#2E86AB" else "#4A7A9B"
-                div(class="prob-champ-row",
-                  tags$span(style=paste0("font-size:0.68em;font-weight:800;color:",col,";width:20px;flex-shrink:0;"),
-                    paste0("#",i)),
-                  flag_img(as.character(r$team)),
-                  tags$span(style=paste0("flex:1;font-size:0.78em;font-weight:",if(i==1)"800" else "500",";color:",if(i<=3)"#E8F4FD" else "#C5D8E8",";"),
-                    as.character(r$team)),
-                  div(style="text-align:right;flex-shrink:0;",
-                    div(style=paste0("font-size:0.85em;font-weight:800;color:",col,";"), paste0(pct,"%")),
-                    div(style="font-size:0.65em;color:#4A7A9B;", paste0(wins,"x")),
-                    div(style=paste0("height:3px;width:",max(bw,3),"px;background:",col,";border-radius:2px;margin-top:2px;margin-left:auto;"))
-                  )
-                )
-              }))
-            )
-          )
+               div(style="background:#08131F;border:1px solid rgba(245,208,96,0.12);border-radius:14px;padding:16px;height:100%;",
+                   tags$div(style="color:#F5D060;font-size:0.72em;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;",
+                            icon("crown", style="margin-right:6px;"),
+                            "Frecuencia de Campeonato"),
+                   tags$div(style="color:#4A7A9B;font-size:0.72em;margin-bottom:12px;",
+                            paste0("Veces campeon / ", input$champ_nsims, " simulaciones")),
+                   div(style="max-height:600px;overflow-y:auto;",
+                       do.call(tagList, lapply(seq_len(nrow(df)), function(i) {
+                         r    <- df[i,]
+                         pct  <- round(r$prob*100, 1)
+                         wins <- round(r$prob * input$champ_nsims)
+                         bw   <- round(r$prob / df$prob[1] * 100)
+                         col  <- if(i==1) "#F5D060" else if(i<=3) "#C8960C" else if(i<=8) "#2E86AB" else "#4A7A9B"
+                         div(class="prob-champ-row",
+                             tags$span(style=paste0("font-size:0.68em;font-weight:800;color:",col,";width:20px;flex-shrink:0;"),
+                                       paste0("#",i)),
+                             flag_img(as.character(r$team)),
+                             tags$span(style=paste0("flex:1;font-size:0.78em;font-weight:",if(i==1)"800" else "500",";color:",if(i<=3)"#E8F4FD" else "#C5D8E8",";"),
+                                       as.character(r$team)),
+                             div(style="text-align:right;flex-shrink:0;",
+                                 div(style=paste0("font-size:0.85em;font-weight:800;color:",col,";"), paste0(pct,"%")),
+                                 div(style="font-size:0.65em;color:#4A7A9B;", paste0(wins,"x")),
+                                 div(style=paste0("height:3px;width:",max(bw,3),"px;background:",col,";border-radius:2px;margin-top:2px;margin-left:auto;"))
+                             )
+                         )
+                       }))
+                   )
+               )
         )
       )
     )
   })
-
+  
   output$kpi_primeros <- renderUI({
     req(sim_result())
     n <- sum(sim_result()$qualified$pos == "1", na.rm=TRUE)
@@ -2627,7 +2917,7 @@ server <- function(input, output, session) {
     n <- nrow(sim_result()$qualified)
     span(class="kpi-val", style=if(!is.null(n) && n==32) "color:#1E8449;" else "color:#F39C12;", n)
   })
-
+  
   # ---- KPIs variables ----
   output$kpi_max_score <- renderUI({
     top <- TEAM_STATS[which.max(TEAM_STATS$strength_score), ]
@@ -2640,14 +2930,14 @@ server <- function(input, output, session) {
     top <- TEAM_STATS[which.max(TEAM_STATS$fifa_points), "team"]
     span(class="kpi-val", style="font-size:1.4em;", top)
   })
-
+  
   # ---- Jornadas UI ----
   output$sim_jornadas_ui <- renderUI({
     req(sim_result())
     mh <- sim_result()$matches
     if (is.null(mh) || nrow(mh) == 0)
       return(div(class="info-text", "Ejecuta la simulacion primero."))
-
+    
     tags$div(
       tags$style(HTML("
         .jornada-grid {
@@ -2698,71 +2988,71 @@ server <- function(input, output, session) {
         .jm-badge.draw { background: rgba(74,122,155,0.18); color: #4A7A9B; }
         .jm-badge.win  { background: rgba(100,207,246,0.12); color: #64CFF6; }
       ")),
-
+      
       do.call(tabsetPanel, c(list(type = "tabs"),
-        lapply(1:3, function(j) {
-          mj   <- mh[mh$jornada == j, ]
-          grps <- sort(unique(mj$grupo))
-
-          tabPanel(paste("Jornada", j),
-            tags$div(class = "jornada-grid",
-              lapply(grps, function(grp) {
-                mg <- mj[mj$grupo == grp, ]
-                tags$div(class = "jornada-group-card",
-                  tags$div(class = "jornada-group-header", paste("Grupo", grp)),
-                  do.call(tagList, lapply(seq_len(nrow(mg)), function(i) {
-                    r      <- mg[i, ]
-                    winner <- if (r$goals_a > r$goals_b) "a"
-                              else if (r$goals_b > r$goals_a) "b"
-                              else "d"
-                    tags$div(class = "jornada-match",
-                      # Equipo A izq
-                      tags$div(class = "jm-team",
-                        flag_img(r$team_a),
-                        tags$span(
-                          class = paste0("jm-name", if (winner=="a") " winner" else ""),
-                          r$team_a)
-                      ),
-                      # Marcador
-                      tags$div(class = "jm-score",
-                        tags$span(class = paste0("jm-goal", if (winner=="a") " win" else ""), r$goals_a),
-                        tags$span(class = "jm-sep", "-"),
-                        tags$span(class = paste0("jm-goal", if (winner=="b") " win" else ""), r$goals_b),
-                        tags$span(
-                          class = paste0("jm-badge ", if (winner=="d") "draw" else "win"),
-                          if (winner=="d") "EMP"
-                          else paste0("^ ", if (winner=="a") r$team_a else r$team_b)
-                        )
-                      ),
-                      # Equipo B der
-                      tags$div(class = "jm-team right",
-                        flag_img(r$team_b),
-                        tags$span(
-                          class = paste0("jm-name", if (winner=="b") " winner" else ""),
-                          r$team_b)
-                      )
-                    )
-                  }))
-                )
-              })
-            )
-          )
-        })
+                             lapply(1:3, function(j) {
+                               mj   <- mh[mh$jornada == j, ]
+                               grps <- sort(unique(mj$grupo))
+                               
+                               tabPanel(paste("Jornada", j),
+                                        tags$div(class = "jornada-grid",
+                                                 lapply(grps, function(grp) {
+                                                   mg <- mj[mj$grupo == grp, ]
+                                                   tags$div(class = "jornada-group-card",
+                                                            tags$div(class = "jornada-group-header", paste("Grupo", grp)),
+                                                            do.call(tagList, lapply(seq_len(nrow(mg)), function(i) {
+                                                              r      <- mg[i, ]
+                                                              winner <- if (r$goals_a > r$goals_b) "a"
+                                                              else if (r$goals_b > r$goals_a) "b"
+                                                              else "d"
+                                                              tags$div(class = "jornada-match",
+                                                                       # Equipo A izq
+                                                                       tags$div(class = "jm-team",
+                                                                                flag_img(r$team_a),
+                                                                                tags$span(
+                                                                                  class = paste0("jm-name", if (winner=="a") " winner" else ""),
+                                                                                  r$team_a)
+                                                                       ),
+                                                                       # Marcador
+                                                                       tags$div(class = "jm-score",
+                                                                                tags$span(class = paste0("jm-goal", if (winner=="a") " win" else ""), r$goals_a),
+                                                                                tags$span(class = "jm-sep", "-"),
+                                                                                tags$span(class = paste0("jm-goal", if (winner=="b") " win" else ""), r$goals_b),
+                                                                                tags$span(
+                                                                                  class = paste0("jm-badge ", if (winner=="d") "draw" else "win"),
+                                                                                  if (winner=="d") "EMP"
+                                                                                  else paste0("^ ", if (winner=="a") r$team_a else r$team_b)
+                                                                                )
+                                                                       ),
+                                                                       # Equipo B der
+                                                                       tags$div(class = "jm-team right",
+                                                                                flag_img(r$team_b),
+                                                                                tags$span(
+                                                                                  class = paste0("jm-name", if (winner=="b") " winner" else ""),
+                                                                                  r$team_b)
+                                                                       )
+                                                              )
+                                                            }))
+                                                   )
+                                                 })
+                                        )
+                               )
+                             })
       ))
     )
   })
-
+  
   # ---- Standings UI ----
   output$sim_standings_ui <- renderUI({
     req(sim_result())
     res <- sim_result()
     if (is.null(res)) return(div(class="info-text", "Ejecuta la simulacion primero."))
     all_st <- res$standings
-
+    
     tagList(
       div(style="margin-bottom:10px;",
-        tags$span(style="color:#64CFF6;font-size:0.75em;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;",
-          icon("table", style="margin-right:6px;"), "Tablas de posiciones finales")
+          tags$span(style="color:#64CFF6;font-size:0.75em;font-weight:800;text-transform:uppercase;letter-spacing:1.5px;",
+                    icon("table", style="margin-right:6px;"), "Tablas de posiciones finales")
       ),
       do.call(tagList, lapply(seq(1, 12, by=4), function(start_idx) {
         grp_names <- names(GROUPS_DATA)[start_idx:min(start_idx+3, 12)]
@@ -2770,41 +3060,41 @@ server <- function(input, output, session) {
           st    <- all_st[[grp]]
           teams <- rownames(st)
           column(3,
-            div(class="group-card", style="margin-bottom:10px;",
-              # Header igual que grupos oficiales
-              div(style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(46,134,171,0.3);padding-bottom:8px;margin-bottom:6px;",
-                tags$span(class="group-title", style="margin:0;border:none;padding:0;font-size:1em;", paste("Grupo", grp)),
-                div(style="display:flex;gap:6px;",
-                  lapply(c("PTS","GF","DG"), function(col)
-                    tags$span(style="color:#4A7A9B;font-size:0.6em;font-weight:700;width:22px;text-align:center;", col)
-                  )
-                )
-              ),
-              # Filas de equipos
-              do.call(tagList, lapply(1:4, function(k) {
-                t   <- teams[k]
-                row <- st[k, ]
-                classified <- k <= 2
-                dg_val <- if (!is.na(row$DG) && row$DG > 0) paste0("+", row$DG) else as.character(row$DG)
-                dg_col <- if (!is.na(row$DG) && row$DG > 0) "#1E8449" else if (!is.na(row$DG) && row$DG < 0) "#C0392B" else "#8BAEC8"
-                div(class="team-row",
-                  style=if(classified) "background:rgba(30,132,73,0.06);" else "",
-                  flag_img(t),
-                  tags$span(class=paste0("pos-badge pos-", k), style="font-size:0.7em;margin-right:2px;", k),
-                  div(class="team-name", style="font-size:0.82em;",
-                    t,
-                    if (t %in% HOST_COUNTRIES) tags$span(class="host-badge", style="margin-left:4px;font-size:0.65em;", "SEDE"),
-                    if (classified) tags$span(style="color:#1E8449;margin-left:4px;font-size:0.7em;font-weight:700;", "Q")
-                  ),
-                  # Stats compactos
-                  div(style="display:flex;gap:0;margin-left:auto;",
-                    tags$span(style="color:#64CFF6;font-weight:800;font-size:0.82em;width:22px;text-align:center;", row$PTS),
-                    tags$span(style="color:#8BAEC8;font-size:0.78em;width:22px;text-align:center;", row$GF),
-                    tags$span(style=paste0("color:", dg_col, ";font-size:0.78em;width:22px;text-align:center;font-weight:700;"), dg_val)
-                  )
-                )
-              }))
-            )
+                 div(class="group-card", style="margin-bottom:10px;",
+                     # Header igual que grupos oficiales
+                     div(style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(46,134,171,0.3);padding-bottom:8px;margin-bottom:6px;",
+                         tags$span(class="group-title", style="margin:0;border:none;padding:0;font-size:1em;", paste("Grupo", grp)),
+                         div(style="display:flex;gap:6px;",
+                             lapply(c("PTS","GF","DG"), function(col)
+                               tags$span(style="color:#4A7A9B;font-size:0.6em;font-weight:700;width:22px;text-align:center;", col)
+                             )
+                         )
+                     ),
+                     # Filas de equipos
+                     do.call(tagList, lapply(1:4, function(k) {
+                       t   <- teams[k]
+                       row <- st[k, ]
+                       classified <- k <= 2
+                       dg_val <- if (!is.na(row$DG) && row$DG > 0) paste0("+", row$DG) else as.character(row$DG)
+                       dg_col <- if (!is.na(row$DG) && row$DG > 0) "#1E8449" else if (!is.na(row$DG) && row$DG < 0) "#C0392B" else "#8BAEC8"
+                       div(class="team-row",
+                           style=if(classified) "background:rgba(30,132,73,0.06);" else "",
+                           flag_img(t),
+                           tags$span(class=paste0("pos-badge pos-", k), style="font-size:0.7em;margin-right:2px;", k),
+                           div(class="team-name", style="font-size:0.82em;",
+                               t,
+                               if (t %in% HOST_COUNTRIES) tags$span(class="host-badge", style="margin-left:4px;font-size:0.65em;", "SEDE"),
+                               if (classified) tags$span(style="color:#1E8449;margin-left:4px;font-size:0.7em;font-weight:700;", "Q")
+                           ),
+                           # Stats compactos
+                           div(style="display:flex;gap:0;margin-left:auto;",
+                               tags$span(style="color:#64CFF6;font-weight:800;font-size:0.82em;width:22px;text-align:center;", row$PTS),
+                               tags$span(style="color:#8BAEC8;font-size:0.78em;width:22px;text-align:center;", row$GF),
+                               tags$span(style=paste0("color:", dg_col, ";font-size:0.78em;width:22px;text-align:center;font-weight:700;"), dg_val)
+                           )
+                       )
+                     }))
+                 )
           )
         }))
       }))
@@ -2814,104 +3104,104 @@ server <- function(input, output, session) {
     req(sim_result())
     q <- sim_result()$qualified
     if (is.null(q) || nrow(q) == 0) return(div(class="info-text", "Corre la simulacion primero."))
-
+    
     # Separar clasificados directos (pos 1 y 2) de mejores terceros
     directs  <- q[q$pos %in% c("1","2"), ]
     thirds   <- q[q$pos == "3*", ]
-
+    
     # -- Tabla por grupos (2 columnas: izquierda grupos A-F, derecha G-L) --
     all_grps <- sort(unique(directs$group))
     left_grps  <- all_grps[1:min(6, length(all_grps))]
     right_grps <- if (length(all_grps) > 6) all_grps[7:length(all_grps)] else character(0)
-
+    
     make_group_block <- function(grp) {
       rows <- directs[directs$group == grp, ]
       rows <- rows[order(rows$pos), ]
       div(style="margin-bottom:12px;",
-        div(style="display:flex;align-items:center;gap:8px;margin-bottom:6px;",
-          tags$span(style="background:rgba(100,207,246,0.15);color:#64CFF6;font-weight:800;
+          div(style="display:flex;align-items:center;gap:8px;margin-bottom:6px;",
+              tags$span(style="background:rgba(100,207,246,0.15);color:#64CFF6;font-weight:800;
                            font-size:0.8em;padding:3px 10px;border-radius:8px;letter-spacing:1px;",
-                   paste("GRUPO", grp)),
-          tags$span(style="height:1px;flex:1;background:rgba(46,134,171,0.2);display:block;")
-        ),
-        do.call(tagList, lapply(1:nrow(rows), function(i) {
-          r     <- rows[i, ]
-          is1st <- r$pos == "1"
-          div(style=paste0(
-            "display:flex;align-items:center;gap:10px;padding:7px 12px;",
-            "border-radius:8px;margin-bottom:4px;",
-            if(is1st) "background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.2);"
-            else      "background:rgba(46,134,171,0.07);border:1px solid rgba(46,134,171,0.15);"
+                        paste("GRUPO", grp)),
+              tags$span(style="height:1px;flex:1;background:rgba(46,134,171,0.2);display:block;")
           ),
-          tags$span(style=paste0(
-            "font-size:0.75em;font-weight:800;width:22px;height:22px;",
-            "display:inline-flex;align-items:center;justify-content:center;",
-            "border-radius:50%;flex-shrink:0;",
-            if(is1st) "background:#F39C12;color:#0D1F3C;"
-            else      "background:rgba(174,214,241,0.2);color:#AED6F1;"
-          ), if(is1st) "1" else "2"),
-          flag_img(as.character(r$team)),
-          tags$span(style=paste0(
-            "font-size:0.88em;font-weight:", if(is1st) "700" else "500", ";",
-            "color:", if(is1st) "#E8F4FD" else "#C5D8E8", ";"
-          ), as.character(r$team)),
-          tags$span(style="margin-left:auto;font-size:0.75em;font-weight:700;color:#64CFF6;
+          do.call(tagList, lapply(1:nrow(rows), function(i) {
+            r     <- rows[i, ]
+            is1st <- r$pos == "1"
+            div(style=paste0(
+              "display:flex;align-items:center;gap:10px;padding:7px 12px;",
+              "border-radius:8px;margin-bottom:4px;",
+              if(is1st) "background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.2);"
+              else      "background:rgba(46,134,171,0.07);border:1px solid rgba(46,134,171,0.15);"
+            ),
+            tags$span(style=paste0(
+              "font-size:0.75em;font-weight:800;width:22px;height:22px;",
+              "display:inline-flex;align-items:center;justify-content:center;",
+              "border-radius:50%;flex-shrink:0;",
+              if(is1st) "background:#F39C12;color:#0D1F3C;"
+              else      "background:rgba(174,214,241,0.2);color:#AED6F1;"
+            ), if(is1st) "1" else "2"),
+            flag_img(as.character(r$team)),
+            tags$span(style=paste0(
+              "font-size:0.88em;font-weight:", if(is1st) "700" else "500", ";",
+              "color:", if(is1st) "#E8F4FD" else "#C5D8E8", ";"
+            ), as.character(r$team)),
+            tags$span(style="margin-left:auto;font-size:0.75em;font-weight:700;color:#64CFF6;
                            background:rgba(46,134,171,0.15);padding:2px 8px;border-radius:8px;",
-                   paste0(r$PTS, " pts"))
-          )
-        }))
+                      paste0(r$PTS, " pts"))
+            )
+          }))
       )
     }
-
+    
     tagList(
       # Grid de grupos
       fluidRow(
         column(6, do.call(tagList, lapply(left_grps,  make_group_block))),
         column(6, do.call(tagList, lapply(right_grps, make_group_block)))
       ),
-
+      
       # Mejores terceros
       if (nrow(thirds) > 0) {
         div(style="margin-top:16px;",
-          div(style="display:flex;align-items:center;gap:8px;margin-bottom:10px;",
-            tags$span(style="background:rgba(142,68,173,0.15);color:#8E44AD;font-weight:800;
+            div(style="display:flex;align-items:center;gap:8px;margin-bottom:10px;",
+                tags$span(style="background:rgba(142,68,173,0.15);color:#8E44AD;font-weight:800;
                              font-size:0.8em;padding:3px 10px;border-radius:8px;letter-spacing:1px;",
-                     icon("medal", style="color:#8E44AD;margin-right:6px;"), "LOS 8 MEJORES TERCEROS"),
-            tags$span(style="height:1px;flex:1;background:rgba(142,68,173,0.2);display:block;")
-          ),
-          div(style="display:flex;flex-wrap:wrap;gap:8px;",
-            lapply(1:nrow(thirds), function(i) {
-              r <- thirds[i, ]
-              div(style="display:flex;align-items:center;gap:8px;padding:7px 12px;
+                          icon("medal", style="color:#8E44AD;margin-right:6px;"), "LOS 8 MEJORES TERCEROS"),
+                tags$span(style="height:1px;flex:1;background:rgba(142,68,173,0.2);display:block;")
+            ),
+            div(style="display:flex;flex-wrap:wrap;gap:8px;",
+                lapply(1:nrow(thirds), function(i) {
+                  r <- thirds[i, ]
+                  div(style="display:flex;align-items:center;gap:8px;padding:7px 12px;
                          background:rgba(142,68,173,0.07);border:1px solid rgba(142,68,173,0.2);
                          border-radius:8px;",
-                tags$span(style="font-size:0.72em;font-weight:700;color:#8E44AD;flex-shrink:0;",
-                         paste0("G-", r$group)),
-                flag_img(as.character(r$team)),
-                tags$span(style="font-size:0.85em;font-weight:600;color:#C5D8E8;",
-                         as.character(r$team)),
-                tags$span(style="font-size:0.72em;color:#64CFF6;font-weight:700;margin-left:4px;",
-                         paste0(r$PTS, " pts"))
-              )
-            })
-          )
+                      tags$span(style="font-size:0.72em;font-weight:700;color:#8E44AD;flex-shrink:0;",
+                                paste0("G-", r$group)),
+                      flag_img(as.character(r$team)),
+                      tags$span(style="font-size:0.85em;font-weight:600;color:#C5D8E8;",
+                                as.character(r$team)),
+                      tags$span(style="font-size:0.72em;color:#64CFF6;font-weight:700;margin-left:4px;",
+                                paste0(r$PTS, " pts"))
+                  )
+                })
+            )
         )
       }
     )
   })
-
+  
   # Grafico confederaciones clasificadas
   output$plot_conf_qual <- renderPlotly({
     req(sim_result())
     q <- sim_result()$qualified
     if (is.null(q)) return(NULL)
-
+    
     conf_counts <- q |>
       mutate(conf = sapply(team, get_conf)) |>
       count(conf)
-
+    
     colors <- sapply(conf_counts$conf, function(c) { idx <- match(c, names(CONF_COLORS)); if (!is.na(idx)) CONF_COLORS[[idx]] else "#888888" })
-
+    
     plot_ly(conf_counts, labels=~conf, values=~n, type="pie",
             marker=list(colors=colors, line=list(color="#0D1F3C", width=2)),
             textinfo="label+value+percent",
@@ -2924,17 +3214,17 @@ server <- function(input, output, session) {
              margin=list(t=20, b=20, l=10, r=10),
              showlegend=TRUE)
   })
-
+  
   # Terceros tabla
   output$thirds_tabla <- renderDT({
     req(sim_result())
     td <- sim_result()$thirds_df
     if (is.null(td)) return(NULL)
-
+    
     td_show <- td
     n_rows  <- nrow(td_show)
     clasifica_vals <- ifelse(seq_len(n_rows) <= 8, "CLASIFICA", "Eliminado")
-
+    
     td_out <- data.frame(
       Rk      = seq_len(n_rows),
       Grupo   = td_show$group,
@@ -2947,68 +3237,68 @@ server <- function(input, output, session) {
       Estado  = clasifica_vals,
       stringsAsFactors = FALSE
     )
-
+    
     datatable(td_out,
-      rownames = FALSE,
-      colnames = c("#", "Grupo", "Equipo", "Region", "Pts", "DG", "GF", "FIFA pts", "Estado"),
-      options  = list(
-        pageLength = 12, dom = "t", ordering = FALSE,
-        columnDefs = list(
-          list(className="dt-center", targets=c(0,1,4,5,6,7)),
-          list(width="30px",  targets=0),
-          list(width="50px",  targets=1),
-          list(width="80px",  targets=3),
-          list(width="100px", targets=8)
-        )
-      ),
-      class = "compact"
+              rownames = FALSE,
+              colnames = c("#", "Grupo", "Equipo", "Region", "Pts", "DG", "GF", "FIFA pts", "Estado"),
+              options  = list(
+                pageLength = 12, dom = "t", ordering = FALSE,
+                columnDefs = list(
+                  list(className="dt-center", targets=c(0,1,4,5,6,7)),
+                  list(width="30px",  targets=0),
+                  list(width="50px",  targets=1),
+                  list(width="80px",  targets=3),
+                  list(width="100px", targets=8)
+                )
+              ),
+              class = "compact"
     ) |>
       formatStyle("Rk",
-        color = styleInterval(c(4, 8), c("#F5D060", "#C8960C", "#4A7A9B")),
-        fontWeight = "800", fontSize = "1em"
+                  color = styleInterval(c(4, 8), c("#F5D060", "#C8960C", "#4A7A9B")),
+                  fontWeight = "800", fontSize = "1em"
       ) |>
       formatStyle("Estado",
-        color      = styleEqual(c("CLASIFICA","Eliminado"), c("#1E8449","#C0392B")),
-        fontWeight = "800",
-        background = styleEqual(
-          c("CLASIFICA","Eliminado"),
-          c("rgba(30,132,73,0.12)", "rgba(192,57,43,0.07)")
-        ),
-        borderRadius = "6px", padding = "3px 8px"
+                  color      = styleEqual(c("CLASIFICA","Eliminado"), c("#1E8449","#C0392B")),
+                  fontWeight = "800",
+                  background = styleEqual(
+                    c("CLASIFICA","Eliminado"),
+                    c("rgba(30,132,73,0.12)", "rgba(192,57,43,0.07)")
+                  ),
+                  borderRadius = "6px", padding = "3px 8px"
       ) |>
       formatStyle("Equipo", fontWeight="700", color="#E8F4FD") |>
       formatStyle("PTS",
-        fontWeight = "800", color = "#64CFF6",
-        background = styleColorBar(c(0, max(td_out$PTS, na.rm=TRUE)), "#1B4F72"),
-        backgroundSize = "100% 55%", backgroundRepeat = "no-repeat",
-        backgroundPosition = "center"
+                  fontWeight = "800", color = "#64CFF6",
+                  background = styleColorBar(c(0, max(td_out$PTS, na.rm=TRUE)), "#1B4F72"),
+                  backgroundSize = "100% 55%", backgroundRepeat = "no-repeat",
+                  backgroundPosition = "center"
       ) |>
       formatStyle(c("DG","GF"),
-        color = "#AED6F1", fontWeight = "600"
+                  color = "#AED6F1", fontWeight = "600"
       ) |>
       formatStyle("FIFA",
-        color = "#4A7A9B", fontSize = "0.85em"
+                  color = "#4A7A9B", fontSize = "0.85em"
       ) |>
       formatStyle("Rk",
-        background = styleInterval(8, c("rgba(30,132,73,0.06)", "")),
-        borderLeft = styleInterval(8,
-          c("3px solid rgba(30,132,73,0.4)", "3px solid rgba(192,57,43,0.25)"))
+                  background = styleInterval(8, c("rgba(30,132,73,0.06)", "")),
+                  borderLeft = styleInterval(8,
+                                             c("3px solid rgba(30,132,73,0.4)", "3px solid rgba(192,57,43,0.25)"))
       )
   })
-
+  
   # ============================================================
   # MONTE CARLO
   # ============================================================
   mc_result <- reactiveVal(NULL)
-
+  
   output$mc_progress_ui <- renderUI({
     if (is.null(mc_result())) {
       div(class="info-text", style="margin-bottom:16px;",
-        icon("info-circle", style="color:#2E86AB;margin-right:6px;"),
-        "Configura el numero de simulaciones y presiona ", strong("Ejecutar Monte Carlo"), ".")
+          icon("info-circle", style="color:#2E86AB;margin-right:6px;"),
+          "Configura el numero de simulaciones y presiona ", strong("Ejecutar Monte Carlo"), ".")
     }
   })
-
+  
   observeEvent(input$btn_mc, {
     n_sims <- input$mc_nsims
     withProgress(message = paste("Monte Carlo:", n_sims, "simulaciones..."), value = 0, {
@@ -3023,14 +3313,14 @@ server <- function(input, output, session) {
       mc_result(res)
     })
   })
-
+  
   output$mc_prob_list_ui <- renderUI({
     req(mc_result())
     df <- mc_result()
     df$prob_pct <- round(df$prob * 100, 1)
     df <- df[order(-df$prob_pct), ]
     df$rank <- seq_len(nrow(df))
-
+    
     tags$div(
       style = "max-height:680px;overflow-y:auto;padding-right:4px;",
       tags$style(HTML("
@@ -3062,21 +3352,21 @@ server <- function(input, output, session) {
         tier  <- if (r$prob_pct >= 70) "tier-high" else if (r$prob_pct >= 40) "tier-mid" else "tier-low"
         pct_c <- if (r$prob_pct >= 70) "#27AE60"   else if (r$prob_pct >= 40) "#2980B9"  else "#4A7A9B"
         tags$div(class = paste("prob-row", tier),
-          tags$span(class = "prob-rank",  paste0("#", r$rank)),
-          flag_img(as.character(r$team)),
-          tags$span(class = "prob-name",
-            style = paste0("color:", if (r$prob_pct >= 70) "#E8F4FD" else "#C5D8E8", ";"),
-            as.character(r$team)
-          ),
-          tags$span(class = "prob-pct",
-            style = paste0("color:", pct_c, ";"),
-            paste0(r$prob_pct, "%")
-          )
+                 tags$span(class = "prob-rank",  paste0("#", r$rank)),
+                 flag_img(as.character(r$team)),
+                 tags$span(class = "prob-name",
+                           style = paste0("color:", if (r$prob_pct >= 70) "#E8F4FD" else "#C5D8E8", ";"),
+                           as.character(r$team)
+                 ),
+                 tags$span(class = "prob-pct",
+                           style = paste0("color:", pct_c, ";"),
+                           paste0(r$prob_pct, "%")
+                 )
         )
       }))
     )
   })
-
+  
   output$plot_mc_probs <- renderPlotly({
     req(mc_result())
     df <- mc_result() |>
@@ -3086,35 +3376,35 @@ server <- function(input, output, session) {
         prob_pct = round(prob * 100, 1),
         team_ord = factor(team, levels = team),
         tier     = ifelse(prob >= 0.70, "Alta (>70%)",
-                   ifelse(prob >= 0.40, "Media (40-70%)", "Baja (<40%)"))
+                          ifelse(prob >= 0.40, "Media (40-70%)", "Baja (<40%)"))
       )
-
+    
     bar_colors <- ifelse(df$prob >= 0.70, "#27AE60",
-                  ifelse(df$prob >= 0.40, "#2980B9", "#1B4F72"))
-
+                         ifelse(df$prob >= 0.40, "#2980B9", "#1B4F72"))
+    
     # Altura dinamica segun numero de equipos
     n <- nrow(df)
     bar_h <- max(18, min(28, 900 / n))  # px por barra
-
+    
     plot_ly(df,
-      x           = ~prob_pct,
-      y           = ~team_ord,
-      type        = "bar",
-      orientation = "h",
-      marker      = list(
-        color = bar_colors,
-        line  = list(color = "rgba(0,0,0,0)", width = 0)
-      ),
-      text          = ~paste0("<b>", prob_pct, "%</b>"),
-      textposition  = "outside",
-      textfont      = list(size = 12, color = "#E8F4FD"),
-      insidetextanchor = "end",
-      hovertemplate = paste0(
-        "<b>%{y}</b><br>",
-        "Clasifica: <b>%{x:.1f}%</b>",
-        "<extra></extra>"
-      ),
-      name = ""
+            x           = ~prob_pct,
+            y           = ~team_ord,
+            type        = "bar",
+            orientation = "h",
+            marker      = list(
+              color = bar_colors,
+              line  = list(color = "rgba(0,0,0,0)", width = 0)
+            ),
+            text          = ~paste0("<b>", prob_pct, "%</b>"),
+            textposition  = "outside",
+            textfont      = list(size = 12, color = "#E8F4FD"),
+            insidetextanchor = "end",
+            hovertemplate = paste0(
+              "<b>%{y}</b><br>",
+              "Clasifica: <b>%{x:.1f}%</b>",
+              "<extra></extra>"
+            ),
+            name = ""
     ) |>
       layout(
         title = list(
@@ -3150,7 +3440,7 @@ server <- function(input, output, session) {
         font          = list(family = "Inter, sans-serif")
       )
   })
-
+  
   output$plot_mc_conf <- renderPlotly({
     req(mc_result())
     df <- mc_result() |>
@@ -3158,9 +3448,9 @@ server <- function(input, output, session) {
       group_by(conf) |>
       summarise(mean_prob = mean(prob), n_teams=n(), .groups="drop") |>
       arrange(desc(mean_prob))
-
+    
     colors <- sapply(df$conf, function(c) { idx <- match(c, names(CONF_COLORS)); if (!is.na(idx)) CONF_COLORS[[idx]] else "#888888" })
-
+    
     plot_ly(df, x=~reorder(conf, mean_prob), y=~round(mean_prob*100,1), type="bar",
             marker=list(color=colors, line=list(color="#0D1F3C", width=1)),
             text=~paste0(round(mean_prob*100,1), "%"), textposition="outside",
@@ -3169,7 +3459,7 @@ server <- function(input, output, session) {
                 "Confederacion", "P(clasifica) promedio (%)") |>
       layout(xaxis=list(tickangle=-20), yaxis=list(ticksuffix="%", range=c(0,115)), showlegend=FALSE)
   })
-
+  
   output$mc_tabla <- renderDT({
     req(mc_result())
     df <- mc_result()
@@ -3188,37 +3478,37 @@ server <- function(input, output, session) {
       stringsAsFactors = FALSE
     )
     df2 <- df2[order(-df2$Prob), ]
-
+    
     datatable(df2,
-      rownames = FALSE,
-      colnames = c("Grupo","Equipo","Region","Clasifica (%)","Pts. FIFA"),
-      options  = list(
-        pageLength = 16, dom = "frtip",
-        scrollY = "460px", scrollCollapse = TRUE,
-        order = list(list(3, "desc")),
-        columnDefs = list(
-          list(className = "dt-center", targets = c(0, 3, 4)),
-          list(className = "dt-left",   targets = c(1, 2))
-        )
-      ),
-      class = "compact stripe"
+              rownames = FALSE,
+              colnames = c("Grupo","Equipo","Region","Clasifica (%)","Pts. FIFA"),
+              options  = list(
+                pageLength = 16, dom = "frtip",
+                scrollY = "460px", scrollCollapse = TRUE,
+                order = list(list(3, "desc")),
+                columnDefs = list(
+                  list(className = "dt-center", targets = c(0, 3, 4)),
+                  list(className = "dt-left",   targets = c(1, 2))
+                )
+              ),
+              class = "compact stripe"
     ) |>
       formatStyle("Prob",
-        color      = styleInterval(c(40, 70), c("#8BAEC8", "#AED6F1", "#1E8449")),
-        fontWeight = "bold",
-        fontSize   = "1.05em"
+                  color      = styleInterval(c(40, 70), c("#8BAEC8", "#AED6F1", "#1E8449")),
+                  fontWeight = "bold",
+                  fontSize   = "1.05em"
       ) |>
       formatStyle("Equipo", fontWeight = "600", color = "#E8F4FD") |>
       formatStyle("Grupo",  fontWeight = "700", color = "#64CFF6") |>
       formatStyle("Region", color = "#8BAEC8") |>
       formatStyle("FIFA_pts", color = "#4A7A9B") |>
       formatStyle("Prob",
-        background = styleInterval(c(40, 70),
-          c("rgba(74,122,155,0.08)", "rgba(46,134,171,0.1)", "rgba(30,132,73,0.12)")),
-        borderRadius = "6px"
+                  background = styleInterval(c(40, 70),
+                                             c("rgba(74,122,155,0.08)", "rgba(46,134,171,0.1)", "rgba(30,132,73,0.12)")),
+                  borderRadius = "6px"
       )
   })
-
+  
   # ============================================================
   # VARIABLES
   # ============================================================
@@ -3226,11 +3516,11 @@ server <- function(input, output, session) {
   output$xg_list_ui <- renderUI({
     df <- TEAM_STATS[order(-TEAM_STATS$lambda_base), ]
     df$rank <- seq_len(nrow(df))
-
+    
     # Rango para la barra visual
     mx <- max(df$lambda_base, na.rm = TRUE)
     mn <- min(df$lambda_base, na.rm = TRUE)
-
+    
     tags$div(
       style = "max-height:560px;overflow-y:auto;",
       tags$style(HTML("
@@ -3254,30 +3544,30 @@ server <- function(input, output, session) {
         bw   <- round(pct * 60)
         # Color degradado: rojo fuerte -> naranja -> verde segun nivel
         col  <- if (pct > 0.75) "#27AE60"
-                else if (pct > 0.5) "#2E86AB"
-                else if (pct > 0.25) "#F39C12"
-                else "#C0392B"
+        else if (pct > 0.5) "#2E86AB"
+        else if (pct > 0.25) "#F39C12"
+        else "#C0392B"
         nm_col <- if (pct > 0.75) "#E8F4FD" else "#C5D8E8"
-
+        
         tags$div(class="xg-row",
-          tags$span(class="xg-rank", paste0("#", r$rank)),
-          flag_img(as.character(r$team)),
-          tags$span(class="xg-name", style=paste0("color:", nm_col, ";"), as.character(r$team)),
-          tags$div(class="xg-bar-wrap",
-            tags$div(class="xg-bar-fill",
-              style=paste0("width:", bw, "px;background:", col, ";"))
-          ),
-          tags$span(class="xg-val", style=paste0("color:", col, ";"), xg)
+                 tags$span(class="xg-rank", paste0("#", r$rank)),
+                 flag_img(as.character(r$team)),
+                 tags$span(class="xg-name", style=paste0("color:", nm_col, ";"), as.character(r$team)),
+                 tags$div(class="xg-bar-wrap",
+                          tags$div(class="xg-bar-fill",
+                                   style=paste0("width:", bw, "px;background:", col, ";"))
+                 ),
+                 tags$span(class="xg-val", style=paste0("color:", col, ";"), xg)
         )
       }))
     )
   })
-
+  
   output$plot_strength_score <- renderPlotly({
     df <- TEAM_STATS |>
       arrange(strength_score) |>
       mutate(team_ord = factor(team, levels=team))
-
+    
     plot_ly(df, x=~strength_score, y=~team_ord, type="bar", orientation="h",
             marker=list(color=~color, line=list(color="#0D1F3C", width=0.5)),
             text=~paste0("Goles/partido: ", round(lambda_base,2)),
@@ -3295,14 +3585,14 @@ server <- function(input, output, session) {
       layout(xaxis=list(range=c(0, max(TEAM_STATS$strength_score)*1.25)), showlegend=FALSE,
              margin=list(l=150, r=60, t=80, b=60))
   })
-
+  
   output$plot_conf_scores <- renderPlotly({
     df <- TEAM_STATS
-
+    
     confs <- unique(df$confederation)
     data_by_conf <- lapply(confs, function(c) df[df$confederation==c, "strength_score"])
     colors <- sapply(confs, function(c) { idx <- match(c, names(CONF_COLORS)); if (!is.na(idx)) CONF_COLORS[[idx]] else "#888888" })
-
+    
     p <- plot_ly()
     for (i in seq_along(confs)) {
       p <- p |> add_trace(
@@ -3317,7 +3607,7 @@ server <- function(input, output, session) {
       pl_layout("Poder de ataque por region", "", "Confederacion", "Strength Score") |>
       layout(showlegend=FALSE, margin=list(t=70, b=60))
   })
-
+  
   output$plot_lambda_hist <- renderPlotly({
     df <- TEAM_STATS
     plot_ly(x=~df$lambda_base, type="histogram",
@@ -3327,7 +3617,7 @@ server <- function(input, output, session) {
       pl_layout("Distribucion de goles esperados", "", "Goles por partido (promedio)", "N? de equipos") |>
       layout(margin=list(t=60, b=50))
   })
-
+  
   output$tabla_variables <- renderDT({
     df_show <- TEAM_STATS
     df_show$grupo <- sapply(df_show$team, function(t) {
@@ -3337,7 +3627,7 @@ server <- function(input, output, session) {
     df_show$lambda_base    <- round(df_show$lambda_base, 2)
     df_show$strength_score <- round(df_show$strength_score, 2)
     df_show$Sede           <- ifelse(df_show$is_host, "Sede", "--")
-
+    
     df_out <- data.frame(
       Grupo          = df_show$grupo,
       Equipo         = df_show$team,
@@ -3350,7 +3640,7 @@ server <- function(input, output, session) {
       check.names = FALSE
     )
     df_out <- df_out[order(df_out$Grupo, -df_out$`FIFA pts`), ]
-
+    
     datatable(
       df_out,
       rownames = FALSE,
@@ -3449,33 +3739,33 @@ server <- function(input, output, session) {
       )
     ) |>
       formatStyle("Poder ataque",
-        background         = styleColorBar(c(0, max(df_out[["Poder ataque"]])), "#2E86AB"),
-        backgroundSize     = "100% 65%",
-        backgroundRepeat   = "no-repeat",
-        backgroundPosition = "center",
-        color              = "#E8F4FD",
-        fontWeight         = "bold"
+                  background         = styleColorBar(c(0, max(df_out[["Poder ataque"]])), "#2E86AB"),
+                  backgroundSize     = "100% 65%",
+                  backgroundRepeat   = "no-repeat",
+                  backgroundPosition = "center",
+                  color              = "#E8F4FD",
+                  fontWeight         = "bold"
       ) |>
       formatStyle("Goles/partido",
-        color      = styleInterval(c(1.2, 1.7), c("#8BAEC8", "#64CFF6", "#F39C12")),
-        fontWeight = "700",
-        fontSize   = "1.0em"
+                  color      = styleInterval(c(1.2, 1.7), c("#8BAEC8", "#64CFF6", "#F39C12")),
+                  fontWeight = "700",
+                  fontSize   = "1.0em"
       ) |>
       formatStyle("Sede",
-        color      = styleEqual(c("Sede", "--"), c("#F39C12", "#4A7A9B")),
-        fontWeight = "700"
+                  color      = styleEqual(c("Sede", "--"), c("#F39C12", "#4A7A9B")),
+                  fontWeight = "700"
       ) |>
       formatStyle("Grupo",
-        color      = "#64CFF6",
-        fontWeight = "800"
+                  color      = "#64CFF6",
+                  fontWeight = "800"
       ) |>
       formatStyle("Equipo",
-        color      = "#E8F4FD",
-        fontWeight = "600"
+                  color      = "#E8F4FD",
+                  fontWeight = "600"
       )
   })
-
-
+  
+  
 } # fin server
 
 shinyApp(ui = ui, server = server)
