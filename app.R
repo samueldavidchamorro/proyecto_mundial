@@ -385,35 +385,90 @@ REAL_RESULTS$source    <- "ninguna"
 
 # --- Mapa de nombres API -> nombres internos del simulador ---
 # football-data.org usa nombres oficiales en ingles; mapeamos los que difieren
-API_NAME_MAP <- c(
-  "Korea Republic"           = "South Korea",
-  "South Korea"              = "South Korea",
-  "Czechia"                  = "Czech Republic",
-  "Czech Republic"           = "Czech Republic",
-  "Bosnia-Herzegovina"       = "Bosnia and Herzegovina",
-  "Bosnia and Herzegovina"   = "Bosnia and Herzegovina",
-  "USA"                      = "United States",
-  "United States"            = "United States",
-  "Cote d'Ivoire"            = "Ivory Coast",
-  "Ivory Coast"              = "Ivory Coast",
-  "Curacao"                  = "Curazao",
-  "Curazao"                  = "Curazao",
-  "Cabo Verde"               = "Cape Verde",
-  "Cape Verde"               = "Cape Verde",
-  "DR Congo"                 = "DR Congo",
-  "Congo DR"                 = "DR Congo",
-  "Turkiye"                  = "Turkey",
-  "Turkey"                   = "Turkey"
+# Normaliza un nombre de la API al nombre interno
+# Quita acentos y normaliza a minusculas sin espacios extra
+strip_accents <- function(s) {
+  if (is.null(s) || is.na(s)) return("")
+  s <- as.character(s)
+
+  # Reemplazo manual de caracteres acentuados comunes (robusto en Windows)
+  from <- c("\u00e1","\u00e9","\u00ed","\u00f3","\u00fa","\u00fc","\u00f1",
+            "\u00e0","\u00e8","\u00ec","\u00f2","\u00f9",
+            "\u00e2","\u00ea","\u00ee","\u00f4","\u00fb",
+            "\u00e7","\u00c7",
+            "\u00c1","\u00c9","\u00cd","\u00d3","\u00da","\u00dc","\u00d1",
+            "\u00e3","\u00f5","\u0131","\u015f","\u011f")
+  to   <- c("a","e","i","o","u","u","n",
+            "a","e","i","o","u",
+            "a","e","i","o","u",
+            "c","c",
+            "a","e","i","o","u","u","n",
+            "a","o","i","s","g")
+  for (k in seq_along(from)) s <- gsub(from[k], to[k], s, fixed = TRUE)
+
+  # iconv como segunda pasada por si quedan otros
+  s2 <- tryCatch(iconv(s, to = "ASCII//TRANSLIT"), error = function(e) s)
+  if (!is.na(s2)) s <- s2
+
+  # Convertir guiones, comas, slashes y puntos a espacios (NO eliminarlos)
+  s <- gsub("[-_,/.&]", " ", s)
+  s <- gsub("[^a-zA-Z ]", "", s)   # quita apostrofes y demas
+  s <- tolower(trimws(s))
+  s <- gsub("\\s+", " ", s)
+  s
+}
+
+# Diccionario de alias normalizado (clave = nombre API normalizado, valor = nombre interno)
+ALIAS_NORM <- c(
+  "korea republic"        = "South Korea",
+  "south korea"           = "South Korea",
+  "korea dpr"             = "South Korea",  # por si acaso (no aplica pero seguro)
+  "czechia"               = "Czech Republic",
+  "czech republic"        = "Czech Republic",
+  "bosnia herzegovina"    = "Bosnia and Herzegovina",
+  "bosnia and herzegovina"= "Bosnia and Herzegovina",
+  "usa"                   = "United States",
+  "united states"         = "United States",
+  "cote divoire"          = "Ivory Coast",
+  "cote d ivoire"         = "Ivory Coast",
+  "ivory coast"           = "Ivory Coast",
+  "curacao"               = "Curazao",
+  "curazao"               = "Curazao",
+  "cabo verde"            = "Cape Verde",
+  "cabo verde islands"    = "Cape Verde",
+  "cape verde"            = "Cape Verde",
+  "cape verde islands"    = "Cape Verde",
+  "dr congo"              = "DR Congo",
+  "congo dr"              = "DR Congo",
+  "democratic republic congo"= "DR Congo",
+  "turkiye"               = "Turkey",
+  "turkey"                = "Turkey"
 )
 
-# Normaliza un nombre de la API al nombre interno
 normalize_team_name <- function(api_name) {
   if (is.null(api_name) || is.na(api_name)) return(NA_character_)
-  idx <- match(api_name, names(API_NAME_MAP))
-  if (!is.na(idx)) return(API_NAME_MAP[[idx]])
-  # Si no esta en el mapa, verificar si ya es un nombre interno valido
+
+  norm <- strip_accents(api_name)
+  if (norm == "") return(NA_character_)
+
+  # 1) Buscar en el diccionario de alias normalizado
+  idx <- match(norm, names(ALIAS_NORM))
+  if (!is.na(idx)) return(unname(ALIAS_NORM[[idx]]))
+
+  # 2) Comparar contra los nombres internos normalizados
   all_teams <- unlist(GROUPS_DATA)
-  if (api_name %in% all_teams) return(api_name)
+  norm_internal <- sapply(all_teams, strip_accents)
+  hit <- which(norm_internal == norm)
+  if (length(hit) > 0) return(unname(all_teams[hit[1]]))
+
+  # 3) Matching parcial: el nombre API contiene un nombre interno o viceversa
+  for (i in seq_along(all_teams)) {
+    ni <- norm_internal[i]
+    if (nchar(ni) >= 4 && (grepl(ni, norm, fixed=TRUE) || grepl(norm, ni, fixed=TRUE))) {
+      return(unname(all_teams[i]))
+    }
+  }
+
   NA_character_  # nombre desconocido
 }
 
@@ -446,6 +501,7 @@ fetch_real_results <- function() {
     }
 
     parsed <- list()
+    unmatched <- character(0)   # nombres de la API que no se reconocieron
     for (m in data$matches) {
       # Solo fase de grupos
       stage <- m$stage %||% ""
@@ -455,33 +511,46 @@ fetch_real_results <- function() {
       b_raw <- m$awayTeam$name %||% m$awayTeam$shortName %||% NA
       ta <- normalize_team_name(a_raw)
       tb <- normalize_team_name(b_raw)
+      if (is.na(ta)) unmatched <- c(unmatched, as.character(a_raw))
+      if (is.na(tb)) unmatched <- c(unmatched, as.character(b_raw))
       if (is.na(ta) || is.na(tb)) next  # equipo no reconocido
 
       grp <- find_group_for_pair(ta, tb)
       if (is.na(grp)) next
 
       status <- m$status %||% ""
-      played <- status %in% c("FINISHED", "AWARDED")
 
       ga <- m$score$fullTime$home
       gb <- m$score$fullTime$away
       if (is.null(ga)) ga <- NA_integer_
       if (is.null(gb)) gb <- NA_integer_
 
+      # Un partido cuenta como jugado si tiene status final O si ambos marcadores existen
+      status_done <- status %in% c("FINISHED", "AWARDED", "IN_PLAY", "PAUSED")
+      has_scores  <- !is.na(ga) && !is.na(gb)
+      played <- (status_done || has_scores) && has_scores
+
       parsed[[length(parsed) + 1]] <- list(
         grp = grp, a = ta, b = tb,
         ga = ga, gb = gb,
-        played = played && !is.na(ga) && !is.na(gb)
+        played = played
       )
     }
 
     REAL_RESULTS$matches   <- parsed
     REAL_RESULTS$last_sync <- Sys.time()
     REAL_RESULTS$source    <- "football-data.org"
+    REAL_RESULTS$unmatched <- unique(unmatched)
 
     n_played <- sum(sapply(parsed, function(x) isTRUE(x$played)))
-    list(ok = TRUE, msg = paste0("Sincronizado: ", length(parsed), " partidos (", n_played, " ya jugados)."),
-         total = length(parsed), played = n_played)
+    msg <- paste0("Sincronizado: ", length(parsed), " partidos (", n_played, " ya jugados).")
+    if (length(unique(unmatched)) > 0) {
+      msg <- paste0(msg, " Equipos no reconocidos: ",
+                    paste(unique(unmatched), collapse=", "))
+    }
+    list(ok = TRUE, msg = msg,
+         total = length(parsed), played = n_played,
+         unmatched = unique(unmatched))
   }, error = function(e) {
     list(ok = FALSE, msg = paste("Error al conectar con la API:", conditionMessage(e)))
   })
@@ -1836,6 +1905,16 @@ ui <- dashboardPage(
                   ),
                   div(style="display:flex;align-items:center;gap:12px;",
                     uiOutput("real_results_status"),
+                    actionButton("btn_diag_real",
+                      tagList(icon("search")),
+                      class="btn",
+                      style=paste0(
+                        "background:rgba(46,134,171,0.15) !important;",
+                        "color:#64CFF6 !important;border:1px solid rgba(100,207,246,0.3) !important;",
+                        "border-radius:8px !important;padding:10px 14px !important;"
+                      ),
+                      title="Ver diagnostico de resultados reales"
+                    ),
                     actionButton("btn_sync_real",
                       tagList(icon("sync"), tags$span(style="margin-left:6px;font-weight:700;", "Sincronizar")),
                       class="btn btn-primary",
@@ -1846,7 +1925,9 @@ ui <- dashboardPage(
                       )
                     )
                   )
-                )
+                ),
+                # Panel de diagnostico (oculto hasta presionar la lupa)
+                uiOutput("real_results_diag")
               )),
 
               # Sub-pestanas de resultados
@@ -2636,6 +2717,63 @@ server <- function(input, output, session) {
         showNotification(res$msg, type = "error", duration = 8)
       }
     })
+  })
+
+  # Diagnostico: mostrar/ocultar la lista de partidos cargados
+  diag_visible <- reactiveVal(FALSE)
+  observeEvent(input$btn_diag_real, {
+    diag_visible(!diag_visible())
+  })
+
+  output$real_results_diag <- renderUI({
+    real_sync_trigger()
+    if (!diag_visible()) return(NULL)
+    ms <- REAL_RESULTS$matches
+    if (length(ms) == 0) {
+      return(div(style="margin-top:12px;color:#8BAEC8;font-size:0.82em;",
+        "No hay partidos cargados. Presiona Sincronizar primero."))
+    }
+    # Ordenar por grupo
+    ord <- order(sapply(ms, function(m) m$grp))
+    ms  <- ms[ord]
+
+    div(style=paste0(
+      "margin-top:14px;padding:14px;border-radius:10px;",
+      "background:rgba(8,19,31,0.6);border:1px solid rgba(46,134,171,0.2);",
+      "max-height:340px;overflow-y:auto;"
+    ),
+      tags$div(style="color:#64CFF6;font-size:0.78em;font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;",
+        icon("clipboard-list", style="margin-right:6px;"),
+        paste0("Diagnostico - ", length(ms), " partidos cargados desde la API")),
+      tags$table(style="width:100%;border-collapse:collapse;font-size:0.8em;",
+        tags$thead(tags$tr(style="border-bottom:1px solid rgba(46,134,171,0.3);",
+          tags$th(style="text-align:left;padding:4px 8px;color:#4A7A9B;", "Grupo"),
+          tags$th(style="text-align:left;padding:4px 8px;color:#4A7A9B;", "Local"),
+          tags$th(style="text-align:center;padding:4px 8px;color:#4A7A9B;", "Marcador"),
+          tags$th(style="text-align:left;padding:4px 8px;color:#4A7A9B;", "Visitante"),
+          tags$th(style="text-align:center;padding:4px 8px;color:#4A7A9B;", "Estado")
+        )),
+        tags$tbody(
+          lapply(ms, function(m) {
+            played <- isTRUE(m$played)
+            score  <- if (played) paste0(m$ga, " - ", m$gb) else "-"
+            tags$tr(style="border-bottom:1px solid rgba(46,134,171,0.08);",
+              tags$td(style="padding:4px 8px;color:#64CFF6;font-weight:700;", m$grp),
+              tags$td(style="padding:4px 8px;color:#C5D8E8;", m$a),
+              tags$td(style=paste0("text-align:center;padding:4px 8px;font-weight:800;color:",
+                if(played) "#2ECC71" else "#4A7A9B", ";"), score),
+              tags$td(style="padding:4px 8px;color:#C5D8E8;", m$b),
+              tags$td(style="text-align:center;padding:4px 8px;",
+                if (played)
+                  tags$span(style="color:#2ECC71;font-size:0.85em;", icon("check"), " Real")
+                else
+                  tags$span(style="color:#4A7A9B;font-size:0.85em;", "Pendiente")
+              )
+            )
+          })
+        )
+      )
+    )
   })
 
   output$real_results_status <- renderUI({
