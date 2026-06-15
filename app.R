@@ -360,10 +360,177 @@ get_flag <- function(t) {
   if (!is.na(idx)) FLAG_MAP[[idx]] else "\U0001F3F3"
 }
 
+# ============================================================
+# RESULTADOS REALES DEL MUNDIAL - via API football-data.org
+# ============================================================
+# Las simulaciones usan el marcador REAL para partidos ya jugados
+# y simulan con Poisson solo los partidos pendientes.
+
+# --- Token de la API (gratis en football-data.org/client/register) ---
+# Pega tu token aqui, o ponlo en .Renviron como FOOTBALL_DATA_TOKEN
+FOOTBALL_DATA_TOKEN_FALLBACK <- "03469550b8904d2f84dc131728e85de8"  # <-- pega aqui tu token entre comillas
+
+load_fd_token <- function() {
+  k <- Sys.getenv("FOOTBALL_DATA_TOKEN")
+  if (!identical(k, "")) return(k)
+  FOOTBALL_DATA_TOKEN_FALLBACK
+}
+
+# --- Entorno global que guarda los resultados reales ---
+# Estructura: lista de partidos con grupo, equipos, goles, jugado (TRUE/FALSE)
+REAL_RESULTS <- new.env(parent = emptyenv())
+REAL_RESULTS$matches  <- list()   # cada elemento: list(grp, a, b, ga, gb, played)
+REAL_RESULTS$last_sync <- NULL     # timestamp de la ultima descarga
+REAL_RESULTS$source    <- "ninguna"
+
+# --- Mapa de nombres API -> nombres internos del simulador ---
+# football-data.org usa nombres oficiales en ingles; mapeamos los que difieren
+API_NAME_MAP <- c(
+  "Korea Republic"           = "South Korea",
+  "South Korea"              = "South Korea",
+  "Czechia"                  = "Czech Republic",
+  "Czech Republic"           = "Czech Republic",
+  "Bosnia-Herzegovina"       = "Bosnia and Herzegovina",
+  "Bosnia and Herzegovina"   = "Bosnia and Herzegovina",
+  "USA"                      = "United States",
+  "United States"            = "United States",
+  "Cote d'Ivoire"            = "Ivory Coast",
+  "Ivory Coast"              = "Ivory Coast",
+  "Curacao"                  = "Curazao",
+  "Curazao"                  = "Curazao",
+  "Cabo Verde"               = "Cape Verde",
+  "Cape Verde"               = "Cape Verde",
+  "DR Congo"                 = "DR Congo",
+  "Congo DR"                 = "DR Congo",
+  "Turkiye"                  = "Turkey",
+  "Turkey"                   = "Turkey"
+)
+
+# Normaliza un nombre de la API al nombre interno
+normalize_team_name <- function(api_name) {
+  if (is.null(api_name) || is.na(api_name)) return(NA_character_)
+  idx <- match(api_name, names(API_NAME_MAP))
+  if (!is.na(idx)) return(API_NAME_MAP[[idx]])
+  # Si no esta en el mapa, verificar si ya es un nombre interno valido
+  all_teams <- unlist(GROUPS_DATA)
+  if (api_name %in% all_teams) return(api_name)
+  NA_character_  # nombre desconocido
+}
+
+# Encuentra a que grupo pertenece un par de equipos
+find_group_for_pair <- function(team_a, team_b) {
+  for (g in names(GROUPS_DATA)) {
+    if (team_a %in% GROUPS_DATA[[g]] && team_b %in% GROUPS_DATA[[g]]) return(g)
+  }
+  NA_character_
+}
+
+# --- Descarga resultados desde football-data.org ---
+fetch_real_results <- function() {
+  token <- load_fd_token()
+  if (identical(token, "")) {
+    return(list(ok = FALSE, msg = "No hay token configurado. Registrate en football-data.org y pega tu token."))
+  }
+
+  result <- tryCatch({
+    req <- httr2::request("https://api.football-data.org/v4/competitions/WC/matches") |>
+      httr2::req_url_query(season = 2026) |>
+      httr2::req_headers("X-Auth-Token" = token) |>
+      httr2::req_timeout(15)
+
+    resp <- httr2::req_perform(req)
+    data <- httr2::resp_body_json(resp)
+
+    if (is.null(data$matches)) {
+      return(list(ok = FALSE, msg = "La API no devolvio partidos. Verifica que el Mundial 2026 este disponible."))
+    }
+
+    parsed <- list()
+    for (m in data$matches) {
+      # Solo fase de grupos
+      stage <- m$stage %||% ""
+      if (!grepl("GROUP", toupper(stage))) next
+
+      a_raw <- m$homeTeam$name %||% m$homeTeam$shortName %||% NA
+      b_raw <- m$awayTeam$name %||% m$awayTeam$shortName %||% NA
+      ta <- normalize_team_name(a_raw)
+      tb <- normalize_team_name(b_raw)
+      if (is.na(ta) || is.na(tb)) next  # equipo no reconocido
+
+      grp <- find_group_for_pair(ta, tb)
+      if (is.na(grp)) next
+
+      status <- m$status %||% ""
+      played <- status %in% c("FINISHED", "AWARDED")
+
+      ga <- m$score$fullTime$home
+      gb <- m$score$fullTime$away
+      if (is.null(ga)) ga <- NA_integer_
+      if (is.null(gb)) gb <- NA_integer_
+
+      parsed[[length(parsed) + 1]] <- list(
+        grp = grp, a = ta, b = tb,
+        ga = ga, gb = gb,
+        played = played && !is.na(ga) && !is.na(gb)
+      )
+    }
+
+    REAL_RESULTS$matches   <- parsed
+    REAL_RESULTS$last_sync <- Sys.time()
+    REAL_RESULTS$source    <- "football-data.org"
+
+    n_played <- sum(sapply(parsed, function(x) isTRUE(x$played)))
+    list(ok = TRUE, msg = paste0("Sincronizado: ", length(parsed), " partidos (", n_played, " ya jugados)."),
+         total = length(parsed), played = n_played)
+  }, error = function(e) {
+    list(ok = FALSE, msg = paste("Error al conectar con la API:", conditionMessage(e)))
+  })
+
+  result
+}
+
+# --- Lookup: devuelve el resultado real de un partido si existe ---
+# Retorna NULL si el partido NO se ha jugado (o no hay datos)
+get_real_match <- function(team_a, team_b) {
+  ms <- REAL_RESULTS$matches
+  if (length(ms) == 0) return(NULL)
+  for (m in ms) {
+    if (!isTRUE(m$played)) next
+    # Coincide en cualquier orden
+    if ((m$a == team_a && m$b == team_b)) {
+      return(list(ga = as.integer(m$ga), gb = as.integer(m$gb), swapped = FALSE))
+    }
+    if ((m$a == team_b && m$b == team_a)) {
+      return(list(ga = as.integer(m$gb), gb = as.integer(m$ga), swapped = TRUE))
+    }
+  }
+  NULL
+}
+
+# --- Cuantos partidos reales hay cargados ---
+real_results_summary <- function() {
+  ms <- REAL_RESULTS$matches
+  total  <- length(ms)
+  played <- if (total > 0) sum(sapply(ms, function(x) isTRUE(x$played))) else 0
+  list(total = total, played = played,
+       last_sync = REAL_RESULTS$last_sync,
+       source = REAL_RESULTS$source)
+}
+
 # ---- Motor de simulacion ----
 HOME_BONUS <- 0.25
 
 simulate_match <- function(team_a, team_b, ts = TEAM_STATS, home_team = NULL) {
+  # --- Si el partido YA se jugo, usar el marcador REAL ---
+  real <- get_real_match(team_a, team_b)
+  if (!is.null(real)) {
+    ga <- real$ga; gb <- real$gb
+    if (ga > gb)       return(list(ga=ga, gb=gb, pts_a=3, pts_b=0, result="W", real=TRUE))
+    else if (ga < gb)  return(list(ga=ga, gb=gb, pts_a=0, pts_b=3, result="L", real=TRUE))
+    else               return(list(ga=ga, gb=gb, pts_a=1, pts_b=1, result="D", real=TRUE))
+  }
+
+  # --- Si NO se ha jugado, simular con Poisson ---
   lam_a <- ts_get(team_a, "lambda_base")
   lam_b <- ts_get(team_b, "lambda_base")
   if (is.na(lam_a)) lam_a <- 1.2
@@ -374,9 +541,9 @@ simulate_match <- function(team_a, team_b, ts = TEAM_STATS, home_team = NULL) {
   }
   ga <- rpois(1, lam_a)
   gb <- rpois(1, lam_b)
-  if (ga > gb)       list(ga=ga, gb=gb, pts_a=3, pts_b=0, result="W")
-  else if (ga < gb)  list(ga=ga, gb=gb, pts_a=0, pts_b=3, result="L")
-  else               list(ga=ga, gb=gb, pts_a=1, pts_b=1, result="D")
+  if (ga > gb)       list(ga=ga, gb=gb, pts_a=3, pts_b=0, result="W", real=FALSE)
+  else if (ga < gb)  list(ga=ga, gb=gb, pts_a=0, pts_b=3, result="L", real=FALSE)
+  else               list(ga=ga, gb=gb, pts_a=1, pts_b=1, result="D", real=FALSE)
 }
 
 build_standings <- function(teams) {
@@ -427,11 +594,22 @@ sort_standings <- function(st) {
   result
 }
 
-# ---- Calendario ----
-MATCHDAY_PAIRS <- list(
-  list(c(1,2), c(3,4)),
-  list(c(1,3), c(2,4)),
-  list(c(1,4), c(2,3))
+# ---- Calendario REAL FIFA 2026 (por grupo, por jornada) ----
+# Indices 1-4 corresponden al orden de los equipos en GROUPS_DATA.
+# Cada grupo tiene su propio fixture; el Grupo A difiere del resto.
+GROUP_FIXTURES <- list(
+  A = list(list(c(1,3),c(2,4)), list(c(4,3),c(1,2)), list(c(4,1),c(3,2))),
+  B = list(list(c(1,2),c(3,4)), list(c(4,2),c(1,3)), list(c(4,1),c(2,3))),
+  C = list(list(c(1,2),c(3,4)), list(c(4,2),c(1,3)), list(c(4,1),c(2,3))),
+  D = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  E = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  F = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  G = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  H = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  I = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  J = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  K = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3))),
+  L = list(list(c(1,2),c(3,4)), list(c(1,3),c(4,2)), list(c(4,1),c(2,3)))
 )
 
 run_group_stage <- function(seed = NULL) {
@@ -442,7 +620,7 @@ run_group_stage <- function(seed = NULL) {
   for (jornada in 1:3) {
     for (grp in names(GROUPS_DATA)) {
       teams <- GROUPS_DATA[[grp]]
-      pairs <- MATCHDAY_PAIRS[[jornada]]
+      pairs <- GROUP_FIXTURES[[grp]][[jornada]]
       for (pair in pairs) {
         ta <- teams[pair[1]]
         tb <- teams[pair[2]]
@@ -536,12 +714,21 @@ run_group_stage_fast <- function() {
     pairs <- list(c(1,2),c(1,3),c(1,4),c(2,3),c(2,4),c(3,4))
     for (p in pairs) {
       ta <- teams[p[1]]; tb <- teams[p[2]]
-      la <- lams[ta]; lb <- lams[tb]
-      if (is.na(la)) la <- 1.2
-      if (is.na(lb)) lb <- 1.2
-      if (ta %in% HOST_COUNTRIES) la <- la + HOME_BONUS
-      if (tb %in% HOST_COUNTRIES) lb <- lb + HOME_BONUS
-      ga <- rpois(1L, la); gb <- rpois(1L, lb)
+
+      # --- Si el partido YA se jugo, usar marcador REAL ---
+      real <- get_real_match(ta, tb)
+      if (!is.null(real)) {
+        ga <- real$ga; gb <- real$gb
+      } else {
+        # Simular con Poisson
+        la <- lams[ta]; lb <- lams[tb]
+        if (is.na(la)) la <- 1.2
+        if (is.na(lb)) lb <- 1.2
+        if (ta %in% HOST_COUNTRIES) la <- la + HOME_BONUS
+        if (tb %in% HOST_COUNTRIES) lb <- lb + HOME_BONUS
+        ga <- rpois(1L, la); gb <- rpois(1L, lb)
+      }
+
       gf[ta] <- gf[ta] + ga; gf[tb] <- gf[tb] + gb
       dg[ta] <- dg[ta] + (ga - gb); dg[tb] <- dg[tb] + (gb - ga)
       if (ga > gb)      { pts[ta] <- pts[ta] + 3L }
@@ -1377,7 +1564,7 @@ ui <- dashboardPage(
               
               fluidRow(column(12,
                               tabsetPanel(type = "tabs",
-                                          tabPanel("?Como funciona?", br(),
+                                          tabPanel("\u00bfComo funciona?", br(),
                                                    fluidRow(
                                                      column(7,
                                                             div(class="info-text",
@@ -1388,7 +1575,7 @@ ui <- dashboardPage(
                                                             ),
                                                             div(style="background:rgba(46,134,171,0.08);border-left:4px solid #2E86AB;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
                                                                 tags$h5(icon("futbol", style="color:#64CFF6;margin-right:8px;"),
-                                                                        strong("?Como se decide quien gana?"), style="color:#AED6F1;margin-top:0;"),
+                                                                        strong("\u00bfComo se decide quien gana?"), style="color:#AED6F1;margin-top:0;"),
                                                                 tags$ul(
                                                                   tags$li("Cada seleccion tiene una", strong("fuerza de ataque"), "segun su posicion en el Ranking FIFA."),
                                                                   tags$li(strong("USA, Canada y Mexico"), "tienen una pequena ventaja por jugar en casa."),
@@ -1398,7 +1585,7 @@ ui <- dashboardPage(
                                                             ),
                                                             div(style="background:rgba(30,132,73,0.07);border-left:4px solid #1E8449;border-radius:8px;padding:16px 20px;",
                                                                 tags$h5(icon("trophy", style="color:#1E8449;margin-right:8px;"),
-                                                                        strong("?Quien clasifica?"), style="color:#AED6F1;margin-top:0;"),
+                                                                        strong("\u00bfQuien clasifica?"), style="color:#AED6F1;margin-top:0;"),
                                                                 p("De cada grupo avanzan los", strong("2 primeros."),
                                                                   "Ademas, los", strong("8 mejores terceros"), "de todos los grupos tambien pasan.",
                                                                   "En total:", strong("32 equipos"), "a la Ronda de 16avos.")
@@ -1407,7 +1594,7 @@ ui <- dashboardPage(
                                                      column(5,
                                                             div(style="background:rgba(243,156,18,0.07);border-left:4px solid #F39C12;border-radius:8px;padding:16px 20px;margin-bottom:16px;",
                                                                 tags$h5(icon("dice", style="color:#F39C12;margin-right:8px;"),
-                                                                        strong("?Que son las simulaciones multiples?"), style="color:#AED6F1;margin-top:0;"),
+                                                                        strong("\u00bfQue son las simulaciones multiples?"), style="color:#AED6F1;margin-top:0;"),
                                                                 p("El simulador puede jugar el torneo completo",
                                                                   strong("hasta 1,000 veces"), "con resultados distintos.",
                                                                   "Al final ves", strong("que tan seguido clasifica cada seleccion"),
@@ -1625,7 +1812,43 @@ ui <- dashboardPage(
                                   )
                               )
               )),
-              
+
+              # ---- PANEL DE RESULTADOS REALES (API) ----
+              fluidRow(column(12,
+                div(style=paste0(
+                  "background:linear-gradient(135deg,rgba(30,132,73,0.1),rgba(46,134,171,0.06));",
+                  "border:1px solid rgba(30,132,73,0.3);border-radius:12px;",
+                  "padding:14px 20px;margin-bottom:16px;",
+                  "display:flex;align-items:center;gap:16px;flex-wrap:wrap;"
+                ),
+                  div(style="display:flex;align-items:center;gap:12px;flex:1;min-width:280px;",
+                    tags$div(style=paste0(
+                      "width:40px;height:40px;border-radius:50%;flex-shrink:0;",
+                      "background:rgba(30,132,73,0.15);border:2px solid rgba(30,132,73,0.4);",
+                      "display:flex;align-items:center;justify-content:center;"
+                    ), icon("satellite-dish", style="color:#1E8449;font-size:1.1em;")),
+                    div(
+                      tags$div(style="color:#2ECC71;font-weight:800;font-size:0.9em;",
+                        "Resultados reales del Mundial"),
+                      tags$div(style="color:#8BAEC8;font-size:0.78em;",
+                        "Sincroniza los partidos ya jugados. Las simulaciones usaran el marcador real cuando exista.")
+                    )
+                  ),
+                  div(style="display:flex;align-items:center;gap:12px;",
+                    uiOutput("real_results_status"),
+                    actionButton("btn_sync_real",
+                      tagList(icon("sync"), tags$span(style="margin-left:6px;font-weight:700;", "Sincronizar")),
+                      class="btn btn-primary",
+                      style=paste0(
+                        "background:linear-gradient(135deg,#1E8449,#27AE60) !important;",
+                        "border:none !important;border-radius:8px !important;",
+                        "padding:10px 18px !important;font-weight:700 !important;"
+                      )
+                    )
+                  )
+                )
+              )),
+
               # Sub-pestanas de resultados
               fluidRow(column(12,
                               tags$style(HTML("
@@ -2129,7 +2352,7 @@ ui <- dashboardPage(
       tabItem(tabName = "metodologia",
               fluidRow(column(12, div(class="page-header-strip",
                                       icon("cogs", style="margin-right:10px;font-size:1.2em;"),
-                                      "?Como funciona el simulador?"
+                                      "\u00bfComo funciona el simulador?"
               ))),
               
               fluidRow(column(12,
@@ -2399,6 +2622,39 @@ server <- function(input, output, session) {
   # ---- Reactive: resultado de simulacion unica ----
   sim_result <- reactiveVal(NULL)
   
+  # ---- Resultados reales: sincronizar con la API ----
+  real_sync_trigger <- reactiveVal(0)
+
+  observeEvent(input$btn_sync_real, {
+    withProgress(message = "Conectando con football-data.org...", value = 0.3, {
+      res <- fetch_real_results()
+      setProgress(1.0)
+      if (isTRUE(res$ok)) {
+        showNotification(res$msg, type = "message", duration = 6)
+        real_sync_trigger(real_sync_trigger() + 1)  # fuerza refresco de UI
+      } else {
+        showNotification(res$msg, type = "error", duration = 8)
+      }
+    })
+  })
+
+  output$real_results_status <- renderUI({
+    real_sync_trigger()  # dependencia reactiva
+    s <- real_results_summary()
+    if (s$total == 0) {
+      return(tags$span(style="color:#8BAEC8;font-size:0.8em;",
+        icon("circle", style="color:#4A7A9B;font-size:0.6em;margin-right:5px;"),
+        "Sin sincronizar"))
+    }
+    tags$div(style="text-align:right;",
+      tags$div(style="color:#2ECC71;font-size:0.82em;font-weight:700;",
+        icon("check-circle", style="margin-right:4px;"),
+        paste0(s$played, " partidos reales")),
+      tags$div(style="color:#4A7A9B;font-size:0.7em;",
+        paste0("de ", s$total, " cargados"))
+    )
+  })
+
   observeEvent(input$btn_seed_random, {
     updateNumericInput(session, "sim_seed", value = sample(1:99999, 1))
   })
@@ -2893,10 +3149,161 @@ server <- function(input, output, session) {
                    )
                )
         )
-      )
+      ),
+
+      # ============================================================
+      # CAMINO DEL CAMPEON - ultima simulacion
+      # ============================================================
+      {
+        champ_name <- df$team[1]
+        brk_last   <- brk
+
+        # Trazar el recorrido del campeon ronda por ronda
+        trace_path <- function() {
+          rounds <- list(
+            list(label="16avos",     key="r32"),
+            list(label="Octavos",    key="r16"),
+            list(label="Cuartos",    key="qf"),
+            list(label="Semifinal",  key="sf"),
+            list(label="Final",      key="final")
+          )
+          path <- list()
+          # Determinar quien fue el campeon real de ESTA simulacion (no el mas frecuente)
+          actual_champ <- if (!is.null(brk_last$champion)) brk_last$champion else champ_name
+
+          for (rd in rounds) {
+            matches <- brk_last[[rd$key]]
+            if (is.null(matches)) next
+            for (m in matches) {
+              ta <- as.character(m$a); tb <- as.character(m$b)
+              if (actual_champ %in% c(ta, tb)) {
+                rival <- if (actual_champ == ta) tb else ta
+                gf    <- if (actual_champ == ta) m$ga else m$gb
+                gc    <- if (actual_champ == ta) m$gb else m$ga
+                won   <- as.character(m$winner) == actual_champ
+                resultado <- if (gf > gc) "Victoria" else if (gf < gc) "Derrota" else "Empate (def. por penales)"
+                path[[length(path)+1]] <- list(
+                  ronda = rd$label, rival = rival,
+                  gf = gf, gc = gc, marcador = paste0(gf, " - ", gc),
+                  won = won, resultado = resultado
+                )
+                break
+              }
+            }
+          }
+          path
+        }
+
+        path <- trace_path()
+        actual_champ <- if (!is.null(brk_last$champion)) brk_last$champion else champ_name
+
+        fluidRow(column(12,
+          div(style=paste0(
+            "background:linear-gradient(135deg,#08131F,#0D1F3C);",
+            "border:1px solid rgba(245,208,96,0.2);border-radius:14px;",
+            "padding:20px;margin-top:18px;"
+          ),
+            # Encabezado
+            div(style="display:flex;align-items:center;gap:12px;margin-bottom:8px;",
+              tags$img(src="trophy.png", height="34",
+                style="filter:drop-shadow(0 0 8px rgba(245,208,96,0.5));"),
+              div(
+                tags$div(style="color:#F5D060;font-size:0.95em;font-weight:800;letter-spacing:1px;text-transform:uppercase;",
+                  "Camino del Campeon"),
+                tags$div(style="color:#8BAEC8;font-size:0.8em;",
+                  "Recorrido completo de ", tags$strong(style="color:#E8F4FD;", actual_champ),
+                  " en la ultima simulacion (de la izquierda a la final).")
+              )
+            ),
+
+            # Tabla interactiva del recorrido
+            div(style="overflow-x:auto;margin-top:14px;",
+              tags$table(style="width:100%;border-collapse:collapse;font-size:0.85em;",
+                tags$thead(
+                  tags$tr(style="border-bottom:2px solid rgba(245,208,96,0.3);",
+                    tags$th(style="text-align:left;padding:8px 12px;color:#F5D060;font-size:0.78em;text-transform:uppercase;letter-spacing:1px;", "Ronda"),
+                    tags$th(style="text-align:left;padding:8px 12px;color:#F5D060;font-size:0.78em;text-transform:uppercase;letter-spacing:1px;", "Rival"),
+                    tags$th(style="text-align:center;padding:8px 12px;color:#F5D060;font-size:0.78em;text-transform:uppercase;letter-spacing:1px;", "Marcador"),
+                    tags$th(style="text-align:center;padding:8px 12px;color:#F5D060;font-size:0.78em;text-transform:uppercase;letter-spacing:1px;", "Resultado")
+                  )
+                ),
+                tags$tbody(
+                  lapply(seq_along(path), function(i) {
+                    p <- path[[i]]
+                    is_final <- p$ronda == "Final"
+                    row_bg <- if (is_final) "background:rgba(245,208,96,0.08);" else if (i %% 2 == 0) "background:rgba(46,134,171,0.04);" else ""
+                    res_col <- if (grepl("Victoria", p$resultado)) "#27AE60" else if (grepl("Derrota", p$resultado)) "#C0392B" else "#F39C12"
+                    tags$tr(style=paste0("border-bottom:1px solid rgba(46,134,171,0.12);transition:background 0.15s;", row_bg),
+                      onmouseover="this.style.background='rgba(46,134,171,0.12)'",
+                      onmouseout=paste0("this.style.background='", if (is_final) "rgba(245,208,96,0.08)" else if (i %% 2 == 0) "rgba(46,134,171,0.04)" else "transparent", "'"),
+                      # Ronda
+                      tags$td(style="padding:9px 12px;",
+                        tags$span(style=paste0(
+                          "font-weight:700;font-size:0.9em;",
+                          if (is_final) "color:#F5D060;" else "color:#64CFF6;"
+                        ),
+                          if (is_final) tagList(icon("trophy", style="margin-right:5px;font-size:0.85em;"), p$ronda) else p$ronda)
+                      ),
+                      # Rival con bandera
+                      tags$td(style="padding:9px 12px;",
+                        div(style="display:flex;align-items:center;gap:8px;",
+                          flag_img(p$rival),
+                          tags$span(style="color:#C5D8E8;font-weight:600;", p$rival)
+                        )
+                      ),
+                      # Marcador
+                      tags$td(style="text-align:center;padding:9px 12px;",
+                        tags$span(style=paste0(
+                          "font-weight:900;font-size:1.05em;color:", res_col, ";",
+                          "background:rgba(", if (grepl("Victoria", p$resultado)) "39,174,96" else if (grepl("Derrota", p$resultado)) "192,57,43" else "243,156,18", ",0.12);",
+                          "padding:3px 12px;border-radius:6px;"
+                        ), p$marcador)
+                      ),
+                      # Resultado
+                      tags$td(style="text-align:center;padding:9px 12px;",
+                        tags$span(style=paste0("color:", res_col, ";font-weight:700;font-size:0.85em;"),
+                          p$resultado)
+                      )
+                    )
+                  })
+                )
+              )
+            ),
+
+            # Resumen del recorrido
+            div(style="display:flex;gap:24px;margin-top:16px;padding-top:14px;border-top:1px solid rgba(46,134,171,0.15);flex-wrap:wrap;",
+              {
+                total_gf <- sum(sapply(path, function(p) p$gf))
+                total_gc <- sum(sapply(path, function(p) p$gc))
+                n_partidos <- length(path)
+                victorias <- sum(sapply(path, function(p) grepl("Victoria", p$resultado)))
+                penales   <- sum(sapply(path, function(p) grepl("penales", p$resultado)))
+                tagList(
+                  div(style="display:flex;align-items:center;gap:8px;",
+                    tags$span(style="color:#4A7A9B;font-size:0.75em;text-transform:uppercase;letter-spacing:1px;", "Partidos:"),
+                    tags$span(style="color:#64CFF6;font-weight:800;font-size:1em;", n_partidos)),
+                  div(style="display:flex;align-items:center;gap:8px;",
+                    tags$span(style="color:#4A7A9B;font-size:0.75em;text-transform:uppercase;letter-spacing:1px;", "Goles a favor:"),
+                    tags$span(style="color:#27AE60;font-weight:800;font-size:1em;", total_gf)),
+                  div(style="display:flex;align-items:center;gap:8px;",
+                    tags$span(style="color:#4A7A9B;font-size:0.75em;text-transform:uppercase;letter-spacing:1px;", "Goles en contra:"),
+                    tags$span(style="color:#C0392B;font-weight:800;font-size:1em;", total_gc)),
+                  div(style="display:flex;align-items:center;gap:8px;",
+                    tags$span(style="color:#4A7A9B;font-size:0.75em;text-transform:uppercase;letter-spacing:1px;", "Diferencia:"),
+                    tags$span(style=paste0("font-weight:800;font-size:1em;color:", if (total_gf-total_gc >= 0) "#27AE60" else "#C0392B", ";"),
+                      if (total_gf-total_gc > 0) paste0("+", total_gf-total_gc) else total_gf-total_gc)),
+                  if (penales > 0) div(style="display:flex;align-items:center;gap:8px;",
+                    tags$span(style="color:#4A7A9B;font-size:0.75em;text-transform:uppercase;letter-spacing:1px;", "Definidos por penales:"),
+                    tags$span(style="color:#F39C12;font-weight:800;font-size:1em;", penales))
+                )
+              }
+            )
+          )
+        ))
+      }
     )
   })
-  
+
   output$kpi_primeros <- renderUI({
     req(sim_result())
     n <- sum(sim_result()$qualified$pos == "1", na.rm=TRUE)
