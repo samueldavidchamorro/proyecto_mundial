@@ -189,7 +189,7 @@ nota_box <- function(...) {
 
 # ---- DATOS: Grupos y equipos oficiales WC2026 ----
 GROUPS_DATA <- list(
-  A = c("México",        "South Korea",          "South Africa",    "Czech Republic"),
+  A = c("Mexico",        "South Korea",          "South Africa",    "Czech Republic"),
   B = c("Canada",        "Bosnia and Herzegovina","Qatar",           "Switzerland"),
   C = c("Brazil",        "Morocco",               "Haiti",           "Scotland"),
   D = c("United States", "Paraguay",              "Australia",       "Turkey"),
@@ -203,7 +203,7 @@ GROUPS_DATA <- list(
   L = c("England",       "Croatia",               "Ghana",           "Panama")
 )
 
-HOST_COUNTRIES <- c("United States", "Canada", "México")
+HOST_COUNTRIES <- c("United States", "Canada", "Mexico")
 
 # Confederacion por equipo
 CONF_MAP <- c(
@@ -239,8 +239,15 @@ FLAG_MAP <- c(
 )
 
 # Helper: bandera via flagcdn.com con fallback robusto
+# Tolera nombres con o sin tilde (Mexico / México)
 flag_img <- function(t) {
   idx  <- match(t, names(FLAG_MAP))
+  if (is.na(idx)) {
+    # intentar sin acentos
+    t2 <- strip_accents_basic(t)
+    keys2 <- sapply(names(FLAG_MAP), strip_accents_basic)
+    idx <- match(t2, keys2)
+  }
   code <- if (!is.na(idx)) FLAG_MAP[[idx]] else "un"
   tags$img(
     src    = paste0("https://flagcdn.com/20x15/", code, ".png"),
@@ -249,6 +256,26 @@ flag_img <- function(t) {
     onerror= "this.src='https://flagcdn.com/20x15/un.png'",
     alt    = t
   )
+}
+
+# Quita acentos basicos (para lookups tolerantes), version ligera sin depender de iconv
+strip_accents_basic <- function(s) {
+  s <- gsub("\u00e9", "e", s); s <- gsub("\u00c9", "E", s)  # é É
+  s <- gsub("\u00e1", "a", s); s <- gsub("\u00c1", "A", s)  # á Á
+  s <- gsub("\u00ed", "i", s); s <- gsub("\u00cd", "I", s)  # í Í
+  s <- gsub("\u00f3", "o", s); s <- gsub("\u00d3", "O", s)  # ó Ó
+  s <- gsub("\u00fa", "u", s); s <- gsub("\u00da", "U", s)  # ú Ú
+  s <- gsub("\u00f1", "n", s); s <- gsub("\u00d1", "N", s)  # ñ Ñ
+  s
+}
+
+# Nombre para MOSTRAR (con tilde) a partir del nombre interno (sin tilde)
+DISPLAY_NAME <- c(
+  "Mexico" = "M\u00e9xico"
+)
+display_name <- function(t) {
+  idx <- match(t, names(DISPLAY_NAME))
+  if (!is.na(idx)) DISPLAY_NAME[[idx]] else t
 }
 
 # Helper: copa del mundo SVG inline (no depende de URLs externas)
@@ -312,7 +339,7 @@ FIFA_POINTS <- c(
   "South Africa"=1495, Scotland=1490, Iran=1485, "Ivory Coast"=1480,
   Paraguay=1470, "Cape Verde"=1460, "Bosnia and Herzegovina"=1450, Ghana=1445,
   Jordan=1420, Panama=1415, Haiti=1400, "New Zealand"=1395,
-  "DR Congo"=1390, Uzbekistan=1380, "Curazao"=1360
+  "DR Congo"=1390, Uzbekistan=1380, "Curazao"=1360, Canada=1480
 )
 
 # Calcular strength_score y lambda_base
@@ -1839,7 +1866,7 @@ ui <- dashboardPage(
                                is_host <- t %in% HOST_COUNTRIES
                                div(class="team-row",
                                    flag_img(t),
-                                   div(class="team-name", t,
+                                   div(class="team-name", display_name(t),
                                        if (is_host) tags$span(class="host-badge", style="margin-left:6px;", "SEDE")),
                                    tags$span(class="team-pts", formatC(fpts, format="d"))
                                )
@@ -2474,7 +2501,7 @@ ui <- dashboardPage(
                                                 flag_img(as.character(r$team)),
                                                 tags$span(
                                                   class=paste0("stats-team-name", if(is_host) " host" else ""),
-                                                  as.character(r$team),
+                                                  display_name(as.character(r$team)),
                                                   if(is_host) tags$span(style="font-size:0.7em;margin-left:4px;color:#F39C12;", "*")
                                                 ),
                                                 # FIFA pts
@@ -3042,12 +3069,12 @@ server <- function(input, output, session) {
           tags$tr(class="pvr-row", style="border-bottom:1px solid rgba(46,134,171,0.1);",
             tags$td(style="padding:6px 8px;color:#C5D8E8;",
               div(style="display:flex;align-items:center;gap:5px;",
-                flag_img(r$a), tags$span(style="font-size:0.92em;", r$a),
+                flag_img(r$a), tags$span(style="font-size:0.92em;", display_name(r$a)),
                 tags$span(style="color:#4A7A9B;", "vs"),
-                flag_img(r$b), tags$span(style="font-size:0.92em;", r$b))),
+                flag_img(r$b), tags$span(style="font-size:0.92em;", display_name(r$b)))),
             tags$td(style="text-align:center;padding:6px 8px;font-weight:800;color:#E8F4FD;", r$marcador),
-            tags$td(style="text-align:center;padding:6px 8px;color:#8BAEC8;", r$favorito),
-            tags$td(style="text-align:center;padding:6px 8px;color:#E8F4FD;font-weight:600;", r$real),
+            tags$td(style="text-align:center;padding:6px 8px;color:#8BAEC8;", display_name(r$favorito)),
+            tags$td(style="text-align:center;padding:6px 8px;color:#E8F4FD;font-weight:600;", display_name(r$real)),
             tags$td(style="text-align:center;padding:6px 8px;", icon_res)
           )
         })
@@ -3079,7 +3106,7 @@ server <- function(input, output, session) {
         div(style=paste0("display:flex;align-items:center;gap:6px;padding:5px 8px;",
           "border-radius:7px;background:rgba(11,27,56,0.6);border:1px solid rgba(46,134,171,0.12);"),
           flag_img(as.character(r$team)),
-          tags$span(style="flex:1;font-size:0.78em;color:#C5D8E8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", as.character(r$team)),
+          tags$span(style="flex:1;font-size:0.78em;color:#C5D8E8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", display_name(as.character(r$team))),
           tags$span(style=paste0("font-size:0.82em;font-weight:800;color:", col, ";"), paste0(pct, "%"))
         )
       })
@@ -3115,7 +3142,7 @@ server <- function(input, output, session) {
               tags$span(style=paste0("width:16px;font-weight:800;",
                 if (classifies) "color:#27AE60;" else "color:#4A7A9B;"), k),
               flag_img(t),
-              tags$span(style="flex:1;color:#C5D8E8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", t),
+              tags$span(style="flex:1;color:#C5D8E8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;", display_name(t)),
               tags$span(style="color:#64CFF6;font-weight:700;", paste0(st[k, "PTS"], " pts"))
             )
           }))
@@ -3233,12 +3260,12 @@ server <- function(input, output, session) {
     div(class=cls,
         div(class=paste0("ko-team ", if(wa) "ko-w" else "ko-l"),
             flag_img(ta),
-            tags$span(class=paste0("ko-tname ", if(wa) "ko-w" else "ko-l"), ta),
+            tags$span(class=paste0("ko-tname ", if(wa) "ko-w" else "ko-l"), display_name(ta)),
             tags$span(class=paste0("ko-score ", if(wa) "ko-w" else "ko-l"), ga)
         ),
         div(class=paste0("ko-team ", if(!wa) "ko-w" else "ko-l"),
             flag_img(tb),
-            tags$span(class=paste0("ko-tname ", if(!wa) "ko-w" else "ko-l"), tb),
+            tags$span(class=paste0("ko-tname ", if(!wa) "ko-w" else "ko-l"), display_name(tb)),
             tags$span(class=paste0("ko-score ", if(!wa) "ko-w" else "ko-l"), gb)
         )
     )
@@ -3330,7 +3357,7 @@ server <- function(input, output, session) {
                               div(style="text-align:left;",
                                   div(style="display:flex;align-items:center;gap:12px;",
                                       tags$div(style="transform:scale(2);", flag_img(champ)),
-                                      tags$div(class="champ-name", champ)
+                                      tags$div(class="champ-name", display_name(champ))
                                   ),
                                   tags$div(style="color:#8BAEC8;font-size:0.88em;margin-top:6px;",
                                            paste0("Campeón en ", champ_pct, "% de ", input$champ_nsims, " simulaciones")),
@@ -3424,10 +3451,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           })
@@ -3444,10 +3471,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           })
@@ -3464,10 +3491,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           })
@@ -3484,10 +3511,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           }
@@ -3508,14 +3535,14 @@ server <- function(input, output, session) {
                                               style="display:block;margin:0 auto 10px;"),
                                      div(class="wc-match wc-final", style="width:100%;",
                                          div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                             flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                             flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                              tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                          div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                             flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                             flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                              tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                      ),
                                      tags$div(style="text-align:center;margin-top:8px;font-size:0.7em;font-weight:800;color:#F5D060;",
-                                              paste("Campeón:", as.character(m$winner)))
+                                              paste("Campeón:", display_name(as.character(m$winner))))
                                    )
                                  }
                         ),
@@ -3530,10 +3557,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           }
@@ -3550,10 +3577,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           })
@@ -3570,10 +3597,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           })
@@ -3590,10 +3617,10 @@ server <- function(input, output, session) {
                                             wa <- !is.null(m$winner) && as.character(m$winner)==ta
                                             div(class="wc-match",
                                                 div(class=paste0("wc-team ",if(wa)"wc-w"else"wc-l"),
-                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),ta),
+                                                    flag_img(ta), tags$span(class=paste0("wc-tname ",if(wa)"wc-w"else"wc-l"),display_name(ta)),
                                                     tags$span(class=paste0("wc-sc ",if(wa)"wc-w"else"wc-l"),m$ga)),
                                                 div(class=paste0("wc-team ",if(!wa)"wc-w"else"wc-l"),
-                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),tb),
+                                                    flag_img(tb), tags$span(class=paste0("wc-tname ",if(!wa)"wc-w"else"wc-l"),display_name(tb)),
                                                     tags$span(class=paste0("wc-sc ",if(!wa)"wc-w"else"wc-l"),m$gb))
                                             )
                                           })
@@ -3697,7 +3724,7 @@ server <- function(input, output, session) {
                 tags$div(style="color:#F5D060;font-size:0.95em;font-weight:800;letter-spacing:1px;text-transform:uppercase;",
                   "Camino del Campeón"),
                 tags$div(style="color:#8BAEC8;font-size:0.8em;",
-                  "Recorrido completo de ", tags$strong(style="color:#E8F4FD;", actual_champ),
+                  "Recorrido completo de ", tags$strong(style="color:#E8F4FD;", display_name(actual_champ)),
                   " en la última simulación (de la izquierda a la final).")
               )
             ),
@@ -3734,7 +3761,7 @@ server <- function(input, output, session) {
                       tags$td(style="padding:9px 12px;",
                         div(style="display:flex;align-items:center;gap:8px;",
                           flag_img(p$rival),
-                          tags$span(style="color:#C5D8E8;font-weight:600;", p$rival)
+                          tags$span(style="color:#C5D8E8;font-weight:600;", display_name(p$rival))
                         )
                       ),
                       # Marcador
@@ -3904,7 +3931,7 @@ server <- function(input, output, session) {
                                                                                 flag_img(r$team_a),
                                                                                 tags$span(
                                                                                   class = paste0("jm-name", if (winner=="a") " winner" else ""),
-                                                                                  r$team_a)
+                                                                                  display_name(r$team_a))
                                                                        ),
                                                                        # Marcador
                                                                        tags$div(class = "jm-score",
@@ -3914,7 +3941,7 @@ server <- function(input, output, session) {
                                                                                 tags$span(
                                                                                   class = paste0("jm-badge ", if (winner=="d") "draw" else "win"),
                                                                                   if (winner=="d") "EMP"
-                                                                                  else paste0("^ ", if (winner=="a") r$team_a else r$team_b)
+                                                                                  else paste0("^ ", if (winner=="a") display_name(r$team_a) else display_name(r$team_b))
                                                                                 )
                                                                        ),
                                                                        # Equipo B der
@@ -3922,7 +3949,7 @@ server <- function(input, output, session) {
                                                                                 flag_img(r$team_b),
                                                                                 tags$span(
                                                                                   class = paste0("jm-name", if (winner=="b") " winner" else ""),
-                                                                                  r$team_b)
+                                                                                  display_name(r$team_b))
                                                                        )
                                                               )
                                                             }))
@@ -3975,7 +4002,7 @@ server <- function(input, output, session) {
                            flag_img(t),
                            tags$span(class=paste0("pos-badge pos-", k), style="font-size:0.7em;margin-right:2px;", k),
                            div(class="team-name", style="font-size:0.82em;",
-                               t,
+                               display_name(t),
                                if (t %in% HOST_COUNTRIES) tags$span(class="host-badge", style="margin-left:4px;font-size:0.65em;", "SEDE"),
                                if (classified) tags$span(style="color:#1E8449;margin-left:4px;font-size:0.7em;font-weight:700;", "Q")
                            ),
@@ -4037,7 +4064,7 @@ server <- function(input, output, session) {
             tags$span(style=paste0(
               "font-size:0.88em;font-weight:", if(is1st) "700" else "500", ";",
               "color:", if(is1st) "#E8F4FD" else "#C5D8E8", ";"
-            ), as.character(r$team)),
+            ), display_name(as.character(r$team))),
             tags$span(style="margin-left:auto;font-size:0.75em;font-weight:700;color:#64CFF6;
                            background:rgba(46,134,171,0.15);padding:2px 8px;border-radius:8px;",
                       paste0(r$PTS, " pts"))
@@ -4121,7 +4148,7 @@ server <- function(input, output, session) {
     td_out <- data.frame(
       Rk      = seq_len(n_rows),
       Grupo   = td_show$group,
-      Equipo  = td_show$team,
+      Equipo  = unname(sapply(td_show$team, display_name)),
       Region  = sapply(td_show$team, get_conf),
       PTS     = td_show$PTS,
       DG      = td_show$DG,
@@ -4364,7 +4391,7 @@ server <- function(input, output, session) {
     })
     df2 <- data.frame(
       Grupo    = df$grupo,
-      Equipo   = df$team,
+      Equipo   = unname(sapply(df$team, display_name)),
       Region   = df$conf,
       Prob     = df$prob_pct,
       FIFA_pts = df$fifa_points,
@@ -4445,7 +4472,7 @@ server <- function(input, output, session) {
         tags$div(class="xg-row",
                  tags$span(class="xg-rank", paste0("#", r$rank)),
                  flag_img(as.character(r$team)),
-                 tags$span(class="xg-name", style=paste0("color:", nm_col, ";"), as.character(r$team)),
+                 tags$span(class="xg-name", style=paste0("color:", nm_col, ";"), display_name(as.character(r$team))),
                  tags$div(class="xg-bar-wrap",
                           tags$div(class="xg-bar-fill",
                                    style=paste0("width:", bw, "px;background:", col, ";"))
