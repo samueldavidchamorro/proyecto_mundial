@@ -619,7 +619,7 @@ real_results_summary <- function() {
 
 # --- #2: Comparar predicción del modelo vs resultado real ---
 # Para cada partido jugado, predice el ganador según lambda y compara
-prediction_vs_reality <- function() {
+prediction_vs_reality <- function(n_sims = 2000) {
   ms <- REAL_RESULTS$matches
   if (length(ms) == 0) return(NULL)
   rows <- list()
@@ -629,33 +629,54 @@ prediction_vs_reality <- function() {
     lb <- ts_get(m$b, "lambda_base"); if (is.na(lb)) lb <- 1.2
     if (m$a %in% HOST_COUNTRIES) la <- la + HOME_BONUS
     if (m$b %in% HOST_COUNTRIES) lb <- lb + HOME_BONUS
-    # Prediccion del modelo: quien tiene mayor lambda es favorito
-    pred <- if (la > lb) m$a else if (lb > la) m$b else "Empate"
+
+    # --- Probabilidades del modelo SIN mirar el resultado real ---
+    # Simulamos el partido n_sims veces con Poisson (igual que el motor real)
+    ga_sim <- rpois(n_sims, la)
+    gb_sim <- rpois(n_sims, lb)
+    p_win_a  <- mean(ga_sim >  gb_sim)
+    p_win_b  <- mean(ga_sim <  gb_sim)
+    p_draw   <- mean(ga_sim == gb_sim)
+
+    # Prediccion del modelo: el desenlace mas probable
+    probs <- c(A = p_win_a, Empate = p_draw, B = p_win_b)
+    best  <- names(which.max(probs))
+    pred  <- if (best == "A") m$a else if (best == "B") m$b else "Empate"
+
     # Resultado real
     real <- if (m$ga > m$gb) m$a else if (m$gb > m$ga) m$b else "Empate"
-    # Probabilidad estimada de que A gane (Bradley-Terry simple)
-    p_a <- la / (la + lb)
+
+    # Probabilidad que el modelo asignaba al desenlace REAL (para calibracion)
+    p_real <- if (real == m$a) p_win_a else if (real == m$b) p_win_b else p_draw
+
     acierto <- (pred == real)
     rows[[length(rows)+1]] <- list(
       grp = m$grp, a = m$a, b = m$b,
       marcador = paste0(m$ga, " - ", m$gb),
       favorito = pred, real = real,
-      p_a = round(p_a*100), acierto = acierto
+      p_win_a = round(p_win_a*100), p_draw = round(p_draw*100), p_win_b = round(p_win_b*100),
+      p_real = round(p_real*100),
+      acierto = acierto
     )
   }
   rows
 }
 
-# Resumen de aciertos del modelo
+# Resumen de aciertos y calibracion del modelo
 prediction_accuracy <- function() {
   rows <- prediction_vs_reality()
   if (is.null(rows) || length(rows) == 0) return(NULL)
-  # Solo contar partidos con resultado decisivo para "acierto de ganador"
-  decisive <- Filter(function(r) r$real != "Empate", rows)
-  n_dec <- length(decisive)
-  hits  <- sum(sapply(decisive, function(r) isTRUE(r$acierto)))
-  list(total = length(rows), decisive = n_dec, hits = hits,
-       pct = if (n_dec > 0) round(hits/n_dec*100) else 0)
+  # Acierto = el desenlace mas probable del modelo coincide con la realidad
+  hits  <- sum(sapply(rows, function(r) isTRUE(r$acierto)))
+  total <- length(rows)
+  # Brier score: promedio de (1 - p_asignada_al_real)^2, mas bajo es mejor
+  brier <- mean(sapply(rows, function(r) (1 - r$p_real/100)^2))
+  # Probabilidad promedio que el modelo daba al resultado real
+  avg_p_real <- mean(sapply(rows, function(r) r$p_real))
+  list(total = total, hits = hits,
+       pct = if (total > 0) round(hits/total*100) else 0,
+       brier = round(brier, 3),
+       avg_p_real = round(avg_p_real))
 }
 
 # --- #3: Probabilidad de avance EN VIVO ---
@@ -2583,6 +2604,18 @@ ui <- dashboardPage(
         )),
 
         # --- Mejora 2: predicción vs realidad ---
+        fluidRow(column(12,
+          div(style=paste0("background:rgba(46,134,171,0.06);border:1px solid rgba(46,134,171,0.18);",
+            "border-left:4px solid #64CFF6;border-radius:8px;padding:10px 16px;margin-bottom:14px;"),
+            tags$span(style="color:#64CFF6;font-weight:700;font-size:0.85em;",
+              icon("info-circle", style="margin-right:5px;"), "Como se mide: "),
+            tags$span(style="color:#8BAEC8;font-size:0.83em;",
+              "para cada partido jugado, el modelo simula el encuentro 2000 veces ",
+              tags$strong(style="color:#E8F4FD;", "sin conocer el resultado real"),
+              ", obtiene sus probabilidades, y luego se comparan con lo que de verdad paso. ",
+              "Asi la evaluacion es honesta y no circular.")
+          )
+        )),
         fluidRow(
           column(4,
             div(class="live-card", style="text-align:center;height:100%;",
@@ -3029,18 +3062,30 @@ server <- function(input, output, session) {
   output$envivo_accuracy <- renderUI({
     real_sync_trigger()
     acc <- prediction_accuracy()
-    if (is.null(acc) || acc$decisive == 0) {
+    if (is.null(acc) || acc$total == 0) {
       return(tags$div(style="color:#4A7A9B;padding:20px 0;",
         icon("hourglass-half", style="font-size:1.5em;margin-bottom:8px;display:block;"),
-        "Aún no hay partidos decisivos jugados."))
+        "Aún no hay partidos jugados para evaluar el modelo."))
     }
-    col <- if (acc$pct >= 70) "#27AE60" else if (acc$pct >= 50) "#F39C12" else "#C0392B"
+    col <- if (acc$pct >= 60) "#27AE60" else if (acc$pct >= 45) "#F39C12" else "#C0392B"
     tags$div(
       tags$div(class="acc-big", style=paste0("color:", col, ";"), paste0(acc$pct, "%")),
       tags$div(style="color:#8BAEC8;font-size:0.85em;margin-top:8px;",
-        paste0("Acertó el ganador en ", acc$hits, " de ", acc$decisive, " partidos decisivos")),
-      tags$div(style="color:#4A7A9B;font-size:0.75em;margin-top:4px;",
-        paste0("(", acc$total, " partidos jugados en total)"))
+        paste0("El modelo predijo el desenlace correcto en ", acc$hits, " de ", acc$total, " partidos")),
+      tags$hr(style="border-color:rgba(46,134,171,0.2);margin:12px 0;"),
+      # Metricas de calibracion
+      div(style="display:flex;justify-content:space-around;gap:8px;",
+        div(style="text-align:center;",
+          tags$div(style="color:#64CFF6;font-size:1.3em;font-weight:800;", paste0(acc$avg_p_real, "%")),
+          tags$div(style="color:#4A7A9B;font-size:0.68em;text-transform:uppercase;letter-spacing:0.5px;",
+            "Prob. media al resultado real")),
+        div(style="text-align:center;",
+          tags$div(style="color:#AED6F1;font-size:1.3em;font-weight:800;", acc$brier),
+          tags$div(style="color:#4A7A9B;font-size:0.68em;text-transform:uppercase;letter-spacing:0.5px;",
+            "Brier score (menor = mejor)"))
+      ),
+      tags$div(style="color:#4A7A9B;font-size:0.7em;margin-top:10px;font-style:italic;",
+        "Probabilidades calculadas simulando cada partido 2000 veces, sin mirar el resultado.")
     )
   })
 
@@ -3056,16 +3101,17 @@ server <- function(input, output, session) {
       tags$thead(tags$tr(style="border-bottom:2px solid rgba(46,134,171,0.3);",
         tags$th(style="text-align:left;padding:6px 8px;color:#64CFF6;", "Partido"),
         tags$th(style="text-align:center;padding:6px 8px;color:#64CFF6;", "Marcador"),
-        tags$th(style="text-align:center;padding:6px 8px;color:#64CFF6;", "Favorito"),
-        tags$th(style="text-align:center;padding:6px 8px;color:#64CFF6;", "Resultado"),
+        tags$th(style="text-align:center;padding:6px 8px;color:#64CFF6;", "Prob. modelo (L / E / V)"),
+        tags$th(style="text-align:center;padding:6px 8px;color:#64CFF6;", "P(real)"),
         tags$th(style="text-align:center;padding:6px 8px;color:#64CFF6;", "Modelo")
       )),
       tags$tbody(
         lapply(rows, function(r) {
           ok <- isTRUE(r$acierto)
-          icon_res <- if (r$real == "Empate") tags$span(style="color:#F39C12;", "Empate")
-                      else if (ok) tags$span(style="color:#27AE60;", icon("check"), " Acertó")
+          icon_res <- if (ok) tags$span(style="color:#27AE60;", icon("check"), " Acertó")
                       else tags$span(style="color:#C0392B;", icon("times"), " Falló")
+          # color de p_real: verde si el modelo le daba alta prob
+          pr_col <- if (r$p_real >= 50) "#27AE60" else if (r$p_real >= 33) "#F39C12" else "#C0392B"
           tags$tr(class="pvr-row", style="border-bottom:1px solid rgba(46,134,171,0.1);",
             tags$td(style="padding:6px 8px;color:#C5D8E8;",
               div(style="display:flex;align-items:center;gap:5px;",
@@ -3073,8 +3119,15 @@ server <- function(input, output, session) {
                 tags$span(style="color:#4A7A9B;", "vs"),
                 flag_img(r$b), tags$span(style="font-size:0.92em;", display_name(r$b)))),
             tags$td(style="text-align:center;padding:6px 8px;font-weight:800;color:#E8F4FD;", r$marcador),
-            tags$td(style="text-align:center;padding:6px 8px;color:#8BAEC8;", display_name(r$favorito)),
-            tags$td(style="text-align:center;padding:6px 8px;color:#E8F4FD;font-weight:600;", display_name(r$real)),
+            # Probabilidades L/E/V del modelo
+            tags$td(style="text-align:center;padding:6px 8px;font-size:0.85em;",
+              tags$span(style="color:#64CFF6;", paste0(r$p_win_a, "%")),
+              tags$span(style="color:#4A7A9B;", " / "),
+              tags$span(style="color:#F39C12;", paste0(r$p_draw, "%")),
+              tags$span(style="color:#4A7A9B;", " / "),
+              tags$span(style="color:#E67E22;", paste0(r$p_win_b, "%"))),
+            tags$td(style=paste0("text-align:center;padding:6px 8px;font-weight:800;color:", pr_col, ";"),
+              paste0(r$p_real, "%")),
             tags$td(style="text-align:center;padding:6px 8px;", icon_res)
           )
         })
